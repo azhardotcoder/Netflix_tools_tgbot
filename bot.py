@@ -108,6 +108,21 @@ async def original_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return CHOOSING
     else:
+        # Notify all admins about new user
+        for admin_id in ADMIN_USERS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=(
+                        f"👤 New user started the bot:\n"
+                        f"ID: {user_id}\n"
+                        f"Username: @{user.username or 'N/A'}\n"
+                        f"Name: {user.first_name or ''}\n"
+                        f"Approve with /approve {user_id}"
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify admin: {e}")
         # User is not approved
         await update.message.reply_html(
             f"Hi {user.mention_html()}! 👋\n\n"
