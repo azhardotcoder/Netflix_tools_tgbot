@@ -3,7 +3,7 @@ import os
 import tempfile
 import requests # Import requests library
 import asyncio
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -11,6 +11,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
     ConversationHandler,
+    CallbackQueryHandler
 )
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AUTHORIZED_USERS, ADMIN_USERS
 from checkers import SafeFastChecker, check_cookies_async
@@ -18,6 +19,9 @@ from file_utils import combine_temp_files
 from user_management import user_manager
 from aiohttp import web
 import sys
+from datetime import datetime
+import aiohttp
+import json
 
 # Enable logging
 logging.basicConfig(
@@ -41,9 +45,35 @@ cookie_collection_keyboard = [
 cookie_collection_markup = ReplyKeyboardMarkup(cookie_collection_keyboard, one_time_keyboard=False, resize_keyboard=True)
 
 # --- Health Check Handler ---
+last_health_check = datetime.now()
+MONITORING_INTERVAL = 3600  # 1 hour
+HEALTH_CHECK_INTERVAL = 3600  # 1 hour
+ADMIN_ALERT_CHAT_ID = None  # Will be set when first admin message is received
+WEBHOOK_URL = "https://netflix-tools-tgbot.onrender.com"  # Set the webhook URL
+is_service_down = False  # Flag to track service status
+
 async def health_check(request):
     """Health check endpoint for Render"""
-    return web.Response(text="OK", status=200)
+    global last_health_check, is_service_down
+    last_health_check = datetime.now()
+    
+    # If service was down and now it's up, send recovery message
+    if is_service_down:
+        is_service_down = False
+        if ADMIN_ALERT_CHAT_ID:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                                         params={
+                                             "chat_id": ADMIN_ALERT_CHAT_ID,
+                                             "text": "✅ Service is back online! Health check received."
+                                         }) as response:
+                        if response.status != 200:
+                            logger.error(f"Failed to send recovery message: {await response.text()}")
+            except Exception as e:
+                logger.error(f"Error sending recovery message: {e}")
+    
+    return web.Response(text="OK")
 
 # --- Helper Functions ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -605,16 +635,21 @@ async def request_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # --- Active state control ---
 async def update_user_information(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Update user information in the database whenever they interact with the bot."""
-    user = update.effective_user
-    if user:
-        user_id = user.id
-        username = user.username
-        first_name = user.first_name
+    global ADMIN_ALERT_CHAT_ID
+    
+    if update.effective_user:
+        user_id = update.effective_user.id
+        username = update.effective_user.username
+        first_name = update.effective_user.first_name
+        last_name = update.effective_user.last_name
         
-        # Only update if the user is already approved
-        if user_manager.is_user_approved(user_id):
-            user_manager.update_user_info(user_id, username, first_name)
-    return None
+        # Update user info
+        user_manager.update_user_info(user_id, username, first_name, last_name)
+        
+        # Set admin alert chat ID if user is admin
+        if user_id in ADMIN_USERS and not ADMIN_ALERT_CHAT_ID:
+            ADMIN_ALERT_CHAT_ID = user_id
+            logger.info(f"Set admin alert chat ID to {ADMIN_ALERT_CHAT_ID}")
 
 async def guard_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Blocks interactions when bot is deactivated or user is not approved."""
@@ -638,10 +673,45 @@ async def guard_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
+async def monitor_health():
+    """Monitor health check and alert if service goes down"""
+    global last_health_check, is_service_down
+    
+    while True:
+        try:
+            current_time = datetime.now()
+            time_diff = (current_time - last_health_check).total_seconds()
+            
+            # Only send alert if service is down and we haven't sent an alert yet
+            if time_diff > MONITORING_INTERVAL and not is_service_down:
+                is_service_down = True
+                if ADMIN_ALERT_CHAT_ID:
+                    try:
+                        # Try to send a test message
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                                                 params={
+                                                     "chat_id": ADMIN_ALERT_CHAT_ID,
+                                                     "text": "⚠️ ALERT: Service is down! Health check not received for more than 1 hour."
+                                                 }) as response:
+                                if response.status != 200:
+                                    logger.error(f"Failed to send alert: {await response.text()}")
+                    except Exception as e:
+                        logger.error(f"Error sending alert: {e}")
+            
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)  # Check every hour
+            
+        except Exception as e:
+            logger.error(f"Error in monitoring: {e}")
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)  # If error occurs, wait an hour before retrying
+
 async def main() -> None:
     """Start the bot and web server."""
     # Initialize bot
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Start monitoring task
+    asyncio.create_task(monitor_health())
 
     # Init active flag
     application.bot_data['active'] = True
@@ -702,29 +772,20 @@ async def main() -> None:
     # Get port from environment variable or use default
     port = int(os.environ.get('PORT', 8080))
     
-    # Get webhook URL from environment variable
-    webhook_url = os.environ.get('WEBHOOK_URL')
-    
     try:
-        if webhook_url:
-            # Use webhook mode
-            await application.initialize()
-            await application.start()
-            await application.bot.set_webhook(url=f"{webhook_url}/webhook")
-            
-            # Add webhook handler
-            async def webhook_handler(request):
-                """Handle incoming webhook updates"""
-                update = Update.de_json(await request.json(), application.bot)
-                await application.process_update(update)
-                return web.Response()
-            
-            app.router.add_post('/webhook', webhook_handler)
-        else:
-            # Use polling mode (for local development)
-            await application.initialize()
-            await application.start()
-            await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        # Use webhook mode
+        await application.initialize()
+        await application.start()
+        await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        
+        # Add webhook handler
+        async def webhook_handler(request):
+            """Handle incoming webhook updates"""
+            update = Update.de_json(await request.json(), application.bot)
+            await application.process_update(update)
+            return web.Response()
+        
+        app.router.add_post('/webhook', webhook_handler)
         
         # Start web server
         runner = web.AppRunner(app)
@@ -742,8 +803,7 @@ async def main() -> None:
         logger.error(f"Error in main loop: {e}")
         raise
     finally:
-        if webhook_url:
-            await application.bot.delete_webhook()
+        await application.bot.delete_webhook()
         await application.stop()
 
 if __name__ == "__main__":
