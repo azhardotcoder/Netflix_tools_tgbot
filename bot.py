@@ -757,7 +757,7 @@ async def main() -> None:
         states={
             CHOOSING: [
                 MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
-                MessageHandler(filters.Regex('^🗂️ Combine TXT Files$') & user_filter, request_combine_files),
+                MessageHandler(filters.Regex('^🗂️ Combine \.TXT Files$') & user_filter, request_combine_files),
             ],
             COLLECTING_COOKIE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
