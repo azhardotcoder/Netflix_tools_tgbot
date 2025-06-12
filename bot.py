@@ -17,6 +17,7 @@ from checkers import SafeFastChecker, check_cookies_async
 from file_utils import combine_temp_files
 from user_management import user_manager
 from aiohttp import web
+import sys
 
 # Enable logging
 logging.basicConfig(
@@ -704,50 +705,52 @@ async def main() -> None:
     # Get webhook URL from environment variable
     webhook_url = os.environ.get('WEBHOOK_URL')
     
-    if webhook_url:
-        # Use webhook mode
-        await application.initialize()
-        await application.start()
-        await application.bot.set_webhook(url=f"{webhook_url}/webhook")
-        
-        # Add webhook handler
-        async def webhook_handler(request):
-            """Handle incoming webhook updates"""
-            update = Update.de_json(await request.json(), application.bot)
-            await application.process_update(update)
-            return web.Response()
-        
-        app.router.add_post('/webhook', webhook_handler)
-    else:
-        # Use polling mode (for local development)
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
-    
-    # Start web server
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    logger.info(f"Bot started. Web server running on port {port}")
-    
     try:
-        # Keep the bot running
         if webhook_url:
-            # Keep webhook mode running
-            while True:
-                await asyncio.sleep(3600)  # Sleep for an hour
+            # Use webhook mode
+            await application.initialize()
+            await application.start()
+            await application.bot.set_webhook(url=f"{webhook_url}/webhook")
+            
+            # Add webhook handler
+            async def webhook_handler(request):
+                """Handle incoming webhook updates"""
+                update = Update.de_json(await request.json(), application.bot)
+                await application.process_update(update)
+                return web.Response()
+            
+            app.router.add_post('/webhook', webhook_handler)
         else:
-            # Keep polling mode running
-            await application.updater.stop()
-            # Keep the main loop running
-            while True:
-                await asyncio.sleep(1)
+            # Use polling mode (for local development)
+            await application.initialize()
+            await application.start()
+            await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        
+        # Start web server
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        
+        logger.info(f"Bot started. Web server running on port {port}")
+        
+        # Keep the bot running
+        while True:
+            await asyncio.sleep(3600)  # Sleep for an hour
+            
     except Exception as e:
         logger.error(f"Error in main loop: {e}")
+        raise
     finally:
+        if webhook_url:
+            await application.bot.delete_webhook()
         await application.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
