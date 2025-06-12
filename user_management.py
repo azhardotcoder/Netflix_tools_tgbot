@@ -83,7 +83,7 @@ class UserManager:
             **user_data
         } for user_id, user_data in self.users.items()]
     
-    def update_user_info(self, user_id: int, username: Optional[str] = None, first_name: Optional[str] = None) -> bool:
+    def update_user_info(self, user_id: int, username: Optional[str] = None, first_name: Optional[str] = None, last_name: Optional[str] = None) -> bool:
         """Update user information if the user exists"""
         user_id_str = str(user_id)  # Convert to string for JSON compatibility
         
@@ -98,8 +98,11 @@ class UserManager:
         if first_name is not None:
             self.users[user_id_str]["first_name"] = first_name
         
+        if last_name is not None:
+            self.users[user_id_str]["last_name"] = last_name
+        
         self.save_users()
-        logger.info(f"Updated information for user {user_id} (username: {username}, first_name: {first_name})")
+        logger.info(f"Updated information for user {user_id} (username: {username}, first_name: {first_name}, last_name: {last_name})")
         return True
 
 # Create a singleton instance
