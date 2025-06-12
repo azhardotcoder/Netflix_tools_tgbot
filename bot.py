@@ -741,6 +741,11 @@ async def main() -> None:
         else:
             # Keep polling mode running
             await application.updater.stop()
+            # Keep the main loop running
+            while True:
+                await asyncio.sleep(1)
+    except Exception as e:
+        logger.error(f"Error in main loop: {e}")
     finally:
         await application.stop()
 
