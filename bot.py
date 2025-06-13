@@ -809,10 +809,6 @@ async def main() -> None:
                 MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
                 MessageHandler(filters.TEXT & user_filter, handle_combine_files),
             ],
-            AWAIT_PRIVATIZE_COOKIE: [
-                MessageHandler(filters.Document.TXT & user_filter, process_privatize_cookie),
-                MessageHandler(filters.TEXT & user_filter, process_privatize_cookie),
-            ],
         },
         fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
     )
