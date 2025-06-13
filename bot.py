@@ -760,7 +760,7 @@ async def request_privatize_cookie(update: Update, context: ContextTypes.DEFAULT
     )
     return CHOOSING
 
-def main():
+async def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Start monitoring task (optional, comment if not needed)
@@ -825,8 +825,46 @@ def main():
     # --- Access request handler ---
     application.add_handler(CommandHandler("request", request_access), group=-1)
 
-    # Polling mode: No webhook, no web server
-    application.run_polling()
+    # Start web server for health checks and webhook
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    
+    # Get port from environment variable or use default
+    port = int(os.environ.get('PORT', 8080))
+    
+    try:
+        # Use webhook mode
+        await application.initialize()
+        await application.start()
+        await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        
+        # Add webhook handler
+        async def webhook_handler(request):
+            """Handle incoming webhook updates"""
+            update = Update.de_json(await request.json(), application.bot)
+            await application.process_update(update)
+            return web.Response()
+        
+        app.router.add_post('/webhook', webhook_handler)
+        
+        # Start web server
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        
+        logger.info(f"Bot started. Web server running on port {port}")
+        
+        # Keep the bot running
+        while True:
+            await asyncio.sleep(3600)  # Sleep for an hour
+            
+    except Exception as e:
+        logger.error(f"Error in main loop: {e}")
+        raise
+    finally:
+        await application.bot.delete_webhook()
+        await application.stop()
 
 if __name__ == "__main__":
     try:
