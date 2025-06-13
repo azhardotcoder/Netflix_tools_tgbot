@@ -867,8 +867,9 @@ async def main() -> None:
         await application.stop()
 
 if __name__ == "__main__":
+    import asyncio
     try:
-        main()
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
