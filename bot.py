@@ -22,6 +22,14 @@ import sys
 from datetime import datetime
 import aiohttp
 import json
+import re
+import urllib.parse
+# from selenium import webdriver
+# from selenium.webdriver.common.by import By
+# from selenium.webdriver.chrome.options import Options
+# from selenium.webdriver.support.ui import WebDriverWait
+# from selenium.webdriver.support import expected_conditions as EC
+# from bs4 import BeautifulSoup
 
 # Enable logging
 logging.basicConfig(
@@ -30,11 +38,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- State definitions for ConversationHandler ---
-CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES = range(4)
+CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_PRIVATIZE_COOKIE = range(5)
 
 # --- Keyboard Markups ---
 main_menu_keyboard = [
     ["🍪 Check Cookies", "🗂️ Combine .TXT Files"],
+    ["🔒 Privatize Cookie"]
 ]
 main_menu_markup = ReplyKeyboardMarkup(main_menu_keyboard, one_time_keyboard=True, resize_keyboard=True)
 
@@ -99,7 +108,7 @@ async def original_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_manager.add_user(user_id, user.username, user.first_name)
             
         welcome_message = (
-            f"Hi {user.mention_html()}! 👋\n\n"
+            f"Hi {user.mention_html()}! \n\n"
             f"Welcome to the Netflix Cookie Checker Bot.\n\n"
             f"Please choose an option from the menu below:"
         )
@@ -134,14 +143,10 @@ async def original_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # --- Cookie Checker Flow ---
 async def request_cookie_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Requests the user to upload files for cookie checking."""
-    # Initialize an empty list to store cookie files
     context.user_data['cookie_files'] = []
-    
     await update.message.reply_text(
-        "Please send one or more `.txt` files containing the cookies you want to check. "
-        "Each cookie should be on a new line."
-        "\n\nYou can send multiple files, and when you're done, click the 'Done' button."
+        "Please send one or more `.txt` files OR paste your cookies as text.\n"
+        "Each cookie should be on a new line.\n\nYou can send multiple files or text, and when you're done, click the 'Done' button."
     )
     return COLLECTING_COOKIE_FILES
 
@@ -189,27 +194,31 @@ async def handle_cookie_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return CHOOSING
 
 async def collect_cookie_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Collects multiple `.txt` files for cookie checking."""
-    document = update.message.document
-    if not document or not document.file_name.endswith('.txt'):
-        await update.message.reply_text("That doesn't look like a `.txt` file. Please try again.", reply_markup=cookie_collection_markup)
+    # Accept file or text
+    if update.message.document and update.message.document.file_name.endswith('.txt'):
+        file = await context.bot.get_file(update.message.document.file_id)
+        temp_file_path = tempfile.mktemp(suffix=".txt")
+        await file.download_to_drive(custom_path=temp_file_path)
+        file_name = update.message.document.file_name
+    elif update.message.text:
+        temp_file_path = tempfile.mktemp(suffix=".txt")
+        with open(temp_file_path, 'w', encoding='utf-8') as f:
+            f.write(update.message.text)
+        file_name = "cookie_from_text.txt"
+    else:
+        await update.message.reply_text("That doesn't look like a `.txt` file or valid text. Please try again.", reply_markup=cookie_collection_markup)
         return COLLECTING_COOKIE_FILES
-
-    file = await context.bot.get_file(document.file_id)
-    
-    temp_file_path = tempfile.mktemp(suffix=".txt")
-    await file.download_to_drive(custom_path=temp_file_path)
 
     if 'cookie_files' not in context.user_data:
         context.user_data['cookie_files'] = []
     context.user_data['cookie_files'].append({
         'path': temp_file_path,
-        'name': document.file_name
+        'name': file_name
     })
 
     file_count = len(context.user_data['cookie_files'])
     await update.message.reply_text(
-        f"Added `{document.file_name}`. You've uploaded {file_count} file(s) so far.\n\n"
+        f"Added `{file_name}`. You've uploaded {file_count} file(s) so far.\n\n"
         f"Send more files or click '✅ Done - Check All Cookies' when you're finished.",
         parse_mode='Markdown',
         reply_markup=cookie_collection_markup
@@ -299,23 +308,25 @@ async def request_combine_files(update: Update, context: ContextTypes.DEFAULT_TY
     return AWAIT_COMBINE_FILES
 
 async def handle_combine_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Collects files for combining."""
-    document = update.message.document
-    if document and document.file_name.endswith('.txt'):
-        file = await context.bot.get_file(document.file_id)
-        
+    # Accept file or text
+    if update.message.document and update.message.document.file_name.endswith('.txt'):
+        file = await context.bot.get_file(update.message.document.file_id)
         temp_file_path = tempfile.mktemp(suffix=".txt")
         await file.download_to_drive(custom_path=temp_file_path)
-
-        if 'combine_files' not in context.user_data:
-            context.user_data['combine_files'] = []
-        context.user_data['combine_files'].append(temp_file_path)
-
-        await update.message.reply_text(f"Added `{document.file_name}`. Send another or press 'Done'.", parse_mode='Markdown')
-        return AWAIT_COMBINE_FILES
+    elif update.message.text:
+        temp_file_path = tempfile.mktemp(suffix=".txt")
+        with open(temp_file_path, 'w', encoding='utf-8') as f:
+            f.write(update.message.text)
     else:
-        await update.message.reply_text("Please send only `.txt` files.")
+        await update.message.reply_text("Please send only `.txt` files or paste your text.")
         return AWAIT_COMBINE_FILES
+
+    if 'combine_files' not in context.user_data:
+        context.user_data['combine_files'] = []
+    context.user_data['combine_files'].append(temp_file_path)
+
+    await update.message.reply_text("Added file/text. Send another or press 'Done'.", parse_mode='Markdown')
+    return AWAIT_COMBINE_FILES
 
 async def process_combined_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Combines the collected files and sends the result."""
@@ -720,13 +731,40 @@ async def monitor_health():
             logger.error(f"Error in monitoring: {e}")
             await asyncio.sleep(HEALTH_CHECK_INTERVAL)  # If error occurs, wait an hour before retrying
 
-async def main() -> None:
-    """Start the bot and web server."""
-    # Initialize bot
+async def invalidate_netflix_cookie(netflix_id: str, secure_netflix_id: str) -> bool:
+    """Invalidates the old Netflix cookie by making it expire."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            # First, get the Netflix session
+            headers = {
+                'Cookie': f'NetflixId={netflix_id}; SecureNetflixId={secure_netflix_id}',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            # Make a request to Netflix to invalidate the session
+            async with session.get('https://www.netflix.com/logout', headers=headers) as response:
+                if response.status == 200:
+                    logger.info("Successfully invalidated old cookie")
+                    return True
+                else:
+                    logger.error(f"Failed to invalidate cookie. Status: {response.status}")
+                    return False
+    except Exception as e:
+        logger.error(f"Error invalidating cookie: {e}")
+        return False
+
+async def request_privatize_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "🔒 Privatize Cookie feature is coming soon!\n\n"
+        "Stay tuned for updates."
+    )
+    return CHOOSING
+
+def main():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Start monitoring task
-    asyncio.create_task(monitor_health())
+    # Start monitoring task (optional, comment if not needed)
+    # asyncio.create_task(monitor_health())
 
     # Init active flag
     application.bot_data['active'] = True
@@ -758,15 +796,22 @@ async def main() -> None:
             CHOOSING: [
                 MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
                 MessageHandler(filters.Regex('^🗂️ Combine \.TXT Files$') & user_filter, request_combine_files),
+                MessageHandler(filters.Regex('^🔒 Privatize Cookie$') & user_filter, request_privatize_cookie),
             ],
             COLLECTING_COOKIE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
                 MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_cookie_files),
                 MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
+                MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
             ],
             AWAIT_COMBINE_FILES: [
-                 MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
-                 MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
+                MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
+                MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
+                MessageHandler(filters.TEXT & user_filter, handle_combine_files),
+            ],
+            AWAIT_PRIVATIZE_COOKIE: [
+                MessageHandler(filters.Document.TXT & user_filter, process_privatize_cookie),
+                MessageHandler(filters.TEXT & user_filter, process_privatize_cookie),
             ],
         },
         fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
@@ -779,51 +824,13 @@ async def main() -> None:
     
     # --- Access request handler ---
     application.add_handler(CommandHandler("request", request_access), group=-1)
-    
-    # Start web server for health checks and webhook
-    app = web.Application()
-    app.router.add_get('/health', health_check)
-    
-    # Get port from environment variable or use default
-    port = int(os.environ.get('PORT', 8080))
-    
-    try:
-        # Use webhook mode
-        await application.initialize()
-        await application.start()
-        await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-        
-        # Add webhook handler
-        async def webhook_handler(request):
-            """Handle incoming webhook updates"""
-            update = Update.de_json(await request.json(), application.bot)
-            await application.process_update(update)
-            return web.Response()
-        
-        app.router.add_post('/webhook', webhook_handler)
-        
-        # Start web server
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', port)
-        await site.start()
-        
-        logger.info(f"Bot started. Web server running on port {port}")
-        
-        # Keep the bot running
-        while True:
-            await asyncio.sleep(3600)  # Sleep for an hour
-            
-    except Exception as e:
-        logger.error(f"Error in main loop: {e}")
-        raise
-    finally:
-        await application.bot.delete_webhook()
-        await application.stop()
+
+    # Polling mode: No webhook, no web server
+    application.run_polling()
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
