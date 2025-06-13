@@ -863,9 +863,127 @@ async def main() -> None:
         await application.stop()
 
 if __name__ == "__main__":
+    import os
     import asyncio
+    BOT_MODE = os.getenv("BOT_MODE", "polling").lower()  # "polling" or "webhook"
+    def main_polling():
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        # (Handlers setup code...)
+        application.add_handler(MessageHandler(filters.ALL, update_user_information), group=-2)
+        application.add_handler(MessageHandler(~user_filter & ~(filters.COMMAND & filters.User(ADMIN_USERS)), unauthorized), group=0)
+        application.add_handler(MessageHandler(user_filter & (~filters.COMMAND | ~filters.User(ADMIN_USERS)), guard_active), group=1)
+        application.add_handler(CommandHandler("activate", activate_bot, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("deactivate", deactivate_bot, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("approve", approve_user, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("remove", remove_user, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("listusers", list_users, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("broadcast", broadcast_message, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("adminhelp", admin_help, filters=filters.User(ADMIN_USERS)), group=-1)
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('start', original_start, filters=user_filter)],
+            states={
+                CHOOSING: [
+                    MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
+                    MessageHandler(filters.Regex('^🗂️ Combine \\.TXT Files$') & user_filter, request_combine_files),
+                    MessageHandler(filters.Regex('^🔒 Privatize Cookie$') & user_filter, request_privatize_cookie),
+                ],
+                COLLECTING_COOKIE_FILES: [
+                    MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
+                    MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_cookie_files),
+                    MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
+                    MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
+                ],
+                AWAIT_COMBINE_FILES: [
+                    MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
+                    MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
+                    MessageHandler(filters.TEXT & user_filter, handle_combine_files),
+                ],
+            },
+            fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
+        )
+        application.add_handler(conv_handler)
+        application.add_handler(CommandHandler("testadmin", test_admin_channel))
+        application.add_handler(CommandHandler("testlegacy", test_legacy_send))
+        application.add_handler(CommandHandler("chatinfo", get_chat_info))
+        application.add_handler(CommandHandler("request", request_access), group=-1)
+        logger.info("Bot started in POLLING mode.")
+        application.run_polling()
+    async def main_webhook():
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        # (Handlers setup code...)
+        application.add_handler(MessageHandler(filters.ALL, update_user_information), group=-2)
+        application.add_handler(MessageHandler(~user_filter & ~(filters.COMMAND & filters.User(ADMIN_USERS)), unauthorized), group=0)
+        application.add_handler(MessageHandler(user_filter & (~filters.COMMAND | ~filters.User(ADMIN_USERS)), guard_active), group=1)
+        application.add_handler(CommandHandler("activate", activate_bot, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("deactivate", deactivate_bot, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("approve", approve_user, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("remove", remove_user, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("listusers", list_users, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("broadcast", broadcast_message, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(CommandHandler("adminhelp", admin_help, filters=filters.User(ADMIN_USERS)), group=-1)
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('start', original_start, filters=user_filter)],
+            states={
+                CHOOSING: [
+                    MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
+                    MessageHandler(filters.Regex('^🗂️ Combine \\.TXT Files$') & user_filter, request_combine_files),
+                    MessageHandler(filters.Regex('^🔒 Privatize Cookie$') & user_filter, request_privatize_cookie),
+                ],
+                COLLECTING_COOKIE_FILES: [
+                    MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
+                    MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_cookie_files),
+                    MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
+                    MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
+                ],
+                AWAIT_COMBINE_FILES: [
+                    MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
+                    MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
+                    MessageHandler(filters.TEXT & user_filter, handle_combine_files),
+                ],
+            },
+            fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
+        )
+        application.add_handler(conv_handler)
+        application.add_handler(CommandHandler("testadmin", test_admin_channel))
+        application.add_handler(CommandHandler("testlegacy", test_legacy_send))
+        application.add_handler(CommandHandler("chatinfo", get_chat_info))
+        application.add_handler(CommandHandler("request", request_access), group=-1)
+        app = web.Application()
+        app.router.add_get('/health', health_check)
+        port = int(os.environ.get('PORT', 8080))
+        WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://netflix-tools-tgbot.onrender.com")
+        try:
+            await application.initialize()
+            await application.start()
+            await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+            async def webhook_handler(request):
+                update = Update.de_json(await request.json(), application.bot)
+                await application.process_update(update)
+                return web.Response()
+            app.router.add_post('/webhook', webhook_handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', port)
+            await site.start()
+            logger.info(f"Bot started in WEBHOOK mode. Web server running on port {port}")
+            while True:
+                await asyncio.sleep(3600)
+        except Exception as e:
+            logger.error(f"Error in main loop: {e}")
+            raise
+        finally:
+            await application.bot.delete_webhook()
+            await application.stop()
     try:
-        asyncio.run(main())
+        if BOT_MODE == "webhook":
+            try:
+                asyncio.run(main_webhook())
+            except RuntimeError:
+                # Already running event loop (e.g. in Jupyter/Windows)
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(main_webhook())
+        else:
+            main_polling()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
