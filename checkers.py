@@ -17,18 +17,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def parse_netflix_cookie(cookie_str):
+    """Universal Netflix cookie parser that handles multiple formats."""
+    try:
+        # Remove any leading/trailing whitespace
+        cookie_str = cookie_str.strip()
+        
+        # Handle different formats
+        if " | Cookie = " in cookie_str:
+            cookie_str = cookie_str.split(" | Cookie = ")[-1].strip()
+        elif "Cookie = " in cookie_str:
+            cookie_str = cookie_str.split("Cookie = ")[-1].strip()
+            
+        # Extract NetflixId and SecureNetflixId
+        netflix_id = None
+        secure_netflix_id = None
+        
+        # Split by semicolon and process each part
+        parts = cookie_str.split(';')
+        for part in parts:
+            part = part.strip()
+            # Handle special characters in keys
+            if 'NetflixId=' in part:
+                netflix_id = part.split('NetflixId=')[1].strip()
+            elif 'SecureNetflixId=' in part:
+                secure_netflix_id = part.split('SecureNetflixId=')[1].strip()
+                
+        # Return the essential cookie parts
+        if netflix_id and secure_netflix_id:
+            return f"NetflixId={netflix_id}; SecureNetflixId={secure_netflix_id}"
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error parsing cookie: {e}")
+        return None
+
 def extract_cookie_from_line(line):
     """Extract cookie from different formats."""
-    if " | Cookie = " in line:
-        cookie_part = line.split(" | Cookie = ")[-1].strip()
-        return cookie_part if cookie_part else None
-    elif "Cookie = " in line:
-        cookie_part = line.split("Cookie = ")[-1].strip()
-        return cookie_part if cookie_part else None
-    else:
-        # Assume it's a raw cookie string
-        clean_cookie = line.strip()
-        return clean_cookie if clean_cookie else None
+    try:
+        # First try the universal parser
+        cookie = parse_netflix_cookie(line)
+        if cookie:
+            return cookie
+            
+        # Fallback to old format handling
+        if " | Cookie = " in line:
+            cookie_part = line.split(" | Cookie = ")[-1].strip()
+            return cookie_part if cookie_part else None
+        elif "Cookie = " in line:
+            cookie_part = line.split("Cookie = ")[-1].strip()
+            return cookie_part if cookie_part else None
+        else:
+            # Assume it's a raw cookie string
+            clean_cookie = line.strip()
+            return clean_cookie if clean_cookie else None
+    except Exception as e:
+        logger.error(f"Error extracting cookie: {e}")
+        return None
 
 class SafeFastChecker:
     """Safe mode checker with smart delays"""
