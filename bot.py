@@ -970,8 +970,7 @@ async def handle_global_commands(update: Update, context: ContextTypes.DEFAULT_T
     elif text.startswith("/info"):
         await info_command(update, context)
         return CHOOSING
-    # fallback
-    await update.message.reply_text("Unknown command!", reply_markup=main_menu_markup)
+    # For all other commands, do nothing (no reply)
     return CHOOSING
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
