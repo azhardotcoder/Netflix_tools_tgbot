@@ -14,7 +14,7 @@ from telegram.ext import (
     CallbackQueryHandler
 )
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AUTHORIZED_USERS, ADMIN_USERS
-from checkers import SafeFastChecker, check_cookies_async
+from checkers import SafeFastChecker, check_cookies_async, parse_netflix_cookie, extract_cookie_from_line
 from file_utils import combine_temp_files
 from user_management import user_manager
 from aiohttp import web
@@ -30,6 +30,7 @@ import urllib.parse
 # from selenium.webdriver.support.ui import WebDriverWait
 # from selenium.webdriver.support import expected_conditions as EC
 # from bs4 import BeautifulSoup
+from utils import extract_netflix_account_info, get_random_headers
 
 # Enable logging
 logging.basicConfig(
@@ -38,12 +39,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- State definitions for ConversationHandler ---
-CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_PRIVATIZE_COOKIE = range(5)
+CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_PRIVATIZE_COOKIE, AWAIT_FILTER_COOKIE = range(6)
 
 # --- Keyboard Markups ---
 main_menu_keyboard = [
     ["🍪 Check Cookies", "🗂️ Combine .TXT Files"],
-    ["🔒 Privatize Cookie"]
+    ["🔒 Privatize Cookie", "🔎 Filter Account"]
 ]
 main_menu_markup = ReplyKeyboardMarkup(main_menu_keyboard, one_time_keyboard=True, resize_keyboard=True)
 
@@ -760,6 +761,76 @@ async def request_privatize_cookie(update: Update, context: ContextTypes.DEFAULT
     )
     return CHOOSING
 
+async def request_filter_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['filter_cookie_file'] = None
+    await update.message.reply_text(
+        "Please send your Netflix cookie as a .txt file or paste the cookie string below.\n\nThis will be used to fetch and filter your account details.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return AWAIT_FILTER_COOKIE
+
+async def handle_filter_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Accept file or text
+    if update.message.document and update.message.document.file_name.endswith('.txt'):
+        file = await context.bot.get_file(update.message.document.file_id)
+        temp_file_path = tempfile.mktemp(suffix=".txt")
+        await file.download_to_drive(custom_path=temp_file_path)
+        with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            cookie_str = f.read().strip()
+        os.remove(temp_file_path)
+    elif update.message.text:
+        cookie_str = update.message.text.strip()
+    else:
+        await update.message.reply_text("That doesn't look like a .txt file or valid text. Please try again.")
+        return AWAIT_FILTER_COOKIE
+
+    # Validate cookie using main checker logic (use extract_cookie_from_line for all formats)
+    parsed_cookie = extract_cookie_from_line(cookie_str)
+    if not parsed_cookie:
+        await update.message.reply_text("❌ Invalid cookie format. Please send a valid Netflix cookie (must contain both NetflixId and SecureNetflixId).\n\nExample: NetflixId=...; SecureNetflixId=...;")
+        return AWAIT_FILTER_COOKIE
+
+    # Save for next step
+    context.user_data['filter_cookie'] = parsed_cookie
+
+    # Animation/feedback: show loading message
+    loading_msg = await update.message.reply_text("⏳ Checking your account details, please wait...")
+
+    try:
+        cookies = {}
+        for part in parsed_cookie.split(';'):
+            if '=' in part:
+                k, v = part.strip().split('=', 1)
+                cookies[k] = v
+        async with aiohttp.ClientSession(headers=get_random_headers()) as session:
+            async def fetch_page(url):
+                async with session.get(url, cookies=cookies, timeout=8) as resp:
+                    return await resp.text()
+            membership_url = 'https://www.netflix.com/account/membership'
+            security_url = 'https://www.netflix.com/account/security'
+            account_url = 'https://www.netflix.com/account'
+            membership_html, security_html, account_html = await asyncio.gather(
+                fetch_page(membership_url),
+                fetch_page(security_url),
+                fetch_page(account_url)
+            )
+        info = extract_netflix_account_info(membership_html, security_html, account_html)
+        msg = (
+            "Netflix Account Details:\n\n"
+            f"Plan: {info.get('plan') or '-'}\n"
+            f"Member Since: {info.get('member_since') or '-'}\n"
+            f"Next Payment: {info.get('next_payment') or '-'}\n"
+            f"Email: {info.get('email') or '-'} ({'✅' if info.get('email_verified') else '❌'})\n"
+            f"Phone: {info.get('phone') or '-'} ({'✅' if info.get('phone_verified') else '❌'})\n"
+        )
+        await update.message.reply_text(msg)
+        # Optionally, delete loading message (if you want):
+        # await loading_msg.delete()
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error fetching account details: {e}")
+        return ConversationHandler.END
+    return CHOOSING
+
 async def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -797,6 +868,7 @@ async def main() -> None:
                 MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
                 MessageHandler(filters.Regex('^🗂️ Combine \.TXT Files$') & user_filter, request_combine_files),
                 MessageHandler(filters.Regex('^🔒 Privatize Cookie$') & user_filter, request_privatize_cookie),
+                MessageHandler(filters.Regex('^🔎 Filter Account$') & user_filter, request_filter_cookie),
             ],
             COLLECTING_COOKIE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
@@ -808,6 +880,10 @@ async def main() -> None:
                 MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
                 MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
                 MessageHandler(filters.TEXT & user_filter, handle_combine_files),
+            ],
+            AWAIT_FILTER_COOKIE: [
+                MessageHandler(filters.Document.TXT & user_filter, handle_filter_cookie),
+                MessageHandler(filters.TEXT & user_filter, handle_filter_cookie),
             ],
         },
         fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
@@ -886,6 +962,7 @@ if __name__ == "__main__":
                     MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
                     MessageHandler(filters.Regex('^🗂️ Combine \\.TXT Files$') & user_filter, request_combine_files),
                     MessageHandler(filters.Regex('^🔒 Privatize Cookie$') & user_filter, request_privatize_cookie),
+                    MessageHandler(filters.Regex('^🔎 Filter Account$') & user_filter, request_filter_cookie),
                 ],
                 COLLECTING_COOKIE_FILES: [
                     MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
@@ -897,6 +974,10 @@ if __name__ == "__main__":
                     MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
                     MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
                     MessageHandler(filters.TEXT & user_filter, handle_combine_files),
+                ],
+                AWAIT_FILTER_COOKIE: [
+                    MessageHandler(filters.Document.TXT & user_filter, handle_filter_cookie),
+                    MessageHandler(filters.TEXT & user_filter, handle_filter_cookie),
                 ],
             },
             fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
@@ -928,6 +1009,7 @@ if __name__ == "__main__":
                     MessageHandler(filters.Regex('^🍪 Check Cookies$') & user_filter, request_cookie_file),
                     MessageHandler(filters.Regex('^🗂️ Combine \\.TXT Files$') & user_filter, request_combine_files),
                     MessageHandler(filters.Regex('^🔒 Privatize Cookie$') & user_filter, request_privatize_cookie),
+                    MessageHandler(filters.Regex('^🔎 Filter Account$') & user_filter, request_filter_cookie),
                 ],
                 COLLECTING_COOKIE_FILES: [
                     MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
@@ -939,6 +1021,10 @@ if __name__ == "__main__":
                     MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
                     MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
                     MessageHandler(filters.TEXT & user_filter, handle_combine_files),
+                ],
+                AWAIT_FILTER_COOKIE: [
+                    MessageHandler(filters.Document.TXT & user_filter, handle_filter_cookie),
+                    MessageHandler(filters.TEXT & user_filter, handle_filter_cookie),
                 ],
             },
             fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
