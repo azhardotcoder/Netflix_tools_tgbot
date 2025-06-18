@@ -54,7 +54,7 @@ class UserManager:
             "username": username,
             "first_name": first_name,
             "approved_at": str(datetime.now()),
-            "valid_until": valid_until
+            "valid_until": valid_until if valid_until is not None else "lifetime"
         }
         self.save_users()
         logger.info(f"User {user_id} ({username or first_name or 'Unknown'}) approved with validity {valid_until}")

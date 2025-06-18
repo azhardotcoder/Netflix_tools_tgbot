@@ -990,59 +990,106 @@ async def handle_global_commands(update: Update, context: ContextTypes.DEFAULT_T
     return CHOOSING
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id if update.effective_user else None
-    is_admin = user_id in ADMIN_USERS
-    if is_admin:
-        users = user_manager.get_all_users()
-        if not users:
-            await update.message.reply_text("No users found.")
+    try:
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            await update.message.reply_text("❌ Error: Could not identify user.")
             return
-        msg = "🗂️ *All Users Validity* 🗂️\n\n"
-        for user in users:
-            username = user.get('username', 'None')
-            first_name = user.get('first_name', 'Unknown')
+
+        is_admin = user_id in ADMIN_USERS
+        if is_admin:
+            users = user_manager.get_all_users()
+            if not users:
+                await update.message.reply_text("📝 No users found in the system.")
+                return
+            
+            msg = "🗂️ *All Users Validity* 🗂️\n\n"
+            for user in users:
+                username = user.get('username', 'None')
+                first_name = user.get('first_name', 'Unknown')
+                valid_until = user.get('valid_until', 'lifetime')
+                
+                # Format validity
+                if valid_until and valid_until != 'lifetime':
+                    try:
+                        dt = datetime.fromisoformat(valid_until)
+                        now = datetime.now()
+                        remaining = dt - now
+                        if remaining.total_seconds() > 0:
+                            valid_until_disp = dt.strftime('%Y-%m-%d %H:%M:%S')
+                            status = "✅ Active"
+                        else:
+                            valid_until_disp = dt.strftime('%Y-%m-%d %H:%M:%S')
+                            status = "❌ Expired"
+                    except Exception:
+                        valid_until_disp = valid_until
+                        status = "⚠️ Invalid Date"
+                else:
+                    valid_until_disp = 'Lifetime'
+                    status = "✅ Active"
+                
+                display_name = username if username and username != 'None' else first_name
+                msg += f"👤 *{display_name}*\n"
+                msg += f"ID: `{user['user_id']}`\n"
+                msg += f"Status: {status}\n"
+                msg += f"Validity: {valid_until_disp}\n\n"
+            
+            await update.message.reply_text(msg, parse_mode='Markdown')
+        else:
+            user = user_manager.users.get(str(user_id))
+            if not user:
+                await update.message.reply_text(
+                    "❌ You are not an approved user.\n"
+                    "Contact for access: @knightownr"
+                )
+                return
+            
             valid_until = user.get('valid_until', 'lifetime')
             if valid_until and valid_until != 'lifetime':
                 try:
                     dt = datetime.fromisoformat(valid_until)
+                    now = datetime.now()
                     valid_until_disp = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    remaining = dt - now
+                    
+                    if remaining.total_seconds() > 0:
+                        days = remaining.days
+                        hours, remainder = divmod(remaining.seconds, 3600)
+                        minutes, _ = divmod(remainder, 60)
+                        
+                        if days > 0:
+                            left = f"{days} days, {hours} hours, {minutes} minutes"
+                        elif hours > 0:
+                            left = f"{hours} hours, {minutes} minutes"
+                        else:
+                            left = f"{minutes} minutes"
+                        
+                        status = "✅ Active"
+                    else:
+                        left = "Expired"
+                        status = "❌ Expired"
                 except Exception:
                     valid_until_disp = valid_until
+                    left = "Unknown"
+                    status = "⚠️ Invalid Date"
             else:
                 valid_until_disp = 'Lifetime'
-            msg += f"ID: `{user['user_id']}` | Name: {username or first_name} | Validity: {valid_until_disp}\n"
-        await update.message.reply_text(msg, parse_mode='Markdown')
-    else:
-        user = user_manager.users.get(str(user_id))
-        if not user:
-            await update.message.reply_text("You are not an approved user.\nContact for renew: @knightownr")
-            return
-        valid_until = user.get('valid_until', 'lifetime')
-        if valid_until and valid_until != 'lifetime':
-            try:
-                dt = datetime.fromisoformat(valid_until)
-                now = datetime.now()
-                valid_until_disp = dt.strftime('%Y-%m-%d %H:%M:%S')
-                remaining = dt - now
-                if remaining.total_seconds() > 0:
-                    days = remaining.days
-                    hours, remainder = divmod(remaining.seconds, 3600)
-                    minutes, _ = divmod(remainder, 60)
-                    if days > 0:
-                        left = f"{days} days, {hours} hours, {minutes} minutes left"
-                    elif hours > 0:
-                        left = f"{hours} hours, {minutes} minutes left"
-                    else:
-                        left = f"{minutes} minutes left"
-                else:
-                    left = "Expired"
-            except Exception:
-                valid_until_disp = valid_until
-                left = "Unknown"
-        else:
-            valid_until_disp = 'Lifetime'
-            left = 'Unlimited'
-        await update.message.reply_text(f"Your access validity: {valid_until_disp}\nTime left: {left}\n\nContact for renew: @knightownr")
+                left = 'Unlimited'
+                status = "✅ Active"
+            
+            msg = "📊 *Your Access Information*\n\n"
+            msg += f"Status: {status}\n"
+            msg += f"Validity: {valid_until_disp}\n"
+            msg += f"Time Left: {left}\n\n"
+            msg += "Contact for renew: @knightownr"
+            
+            await update.message.reply_text(msg, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in info_command: {e}")
+        await update.message.reply_text(
+            "❌ An error occurred while fetching your information.\n"
+            "Please try again later or contact @knightownr"
+        )
 
 # --- Always allowed commands ---
 ALWAYS_ALLOWED_COMMANDS = ["/help", "/info", "/echo", "/request"]
