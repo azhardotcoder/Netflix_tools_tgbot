@@ -146,3 +146,17 @@ def extract_netflix_account_info(membership_html, security_html, account_html=No
             if match:
                 info['member_since'] = match.group(1).strip()
     return info
+
+async def fetch_netflix_service_code(session, cookies=None):
+    try:
+        async with session.get(
+            'https://www.netflix.com/api/shakti/mre/servicecode',
+            cookies=cookies,
+            timeout=8
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get('data', {}).get('authCode')
+            return None
+    except Exception:
+        return None

