@@ -632,7 +632,9 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         
         # Show username if available, otherwise show first name
         display_name = username if username and username != 'None' else first_name
-        user_list += f"ID: {user['user_id']} | Name: {display_name}\n"
+        # Escape special characters for markdown
+        display_name = display_name.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace(']', '\\]')
+        user_list += f"ID: `{user['user_id']}` | Name: {display_name}\n"
     
     await update.message.reply_text(user_list, parse_mode='Markdown')
 
