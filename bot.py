@@ -11,7 +11,9 @@ from telegram.ext import (
     filters,
     ContextTypes,
     ConversationHandler,
-    CallbackQueryHandler
+    CallbackQueryHandler,
+    PicklePersistence,
+    ChatMemberHandler
 )
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AUTHORIZED_USERS, ADMIN_USERS
 from checkers import SafeFastChecker, check_cookies_async, parse_netflix_cookie, extract_cookie_from_line
@@ -24,6 +26,9 @@ import aiohttp
 import json
 import re
 import urllib.parse
+import signal
+import subprocess
+import time
 # from selenium import webdriver
 # from selenium.webdriver.common.by import By
 # from selenium.webdriver.chrome.options import Options
@@ -31,6 +36,7 @@ import urllib.parse
 # from selenium.webdriver.support import expected_conditions as EC
 # from bs4 import BeautifulSoup
 from utils import extract_netflix_account_info, get_random_headers
+from telegram.ext import CallbackContext
 
 # Enable logging
 logging.basicConfig(
@@ -86,10 +92,10 @@ async def health_check(request):
     return web.Response(text="OK")
 
 # --- Helper Functions ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a simple welcome message for debugging."""
-    logger.info("DEBUG: /start command received and handler was triggered.")
-    await update.message.reply_text('Hi! The bot is responding. The issue might be in the ConversationHandler.')
+# async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+#     """Sends a simple welcome message for debugging."""
+#     logger.info("DEBUG: /start command received and handler was triggered.")
+#     await update.message.reply_text('Hi! The bot is responding. The issue might be in the ConversationHandler.')
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Echo the user message for debugging."""
@@ -98,6 +104,10 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def original_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Sends a welcome message and the main menu."""
+    # Clear any existing conversation state
+    context.user_data.clear()
+    context.chat_data.clear()
+    
     user = update.effective_user
     user_id = user.id if user else None
     
@@ -113,8 +123,11 @@ async def original_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Welcome to the Netflix Cookie Checker Bot.\n\n"
             f"Please choose an option from the menu below:"
         )
+        
+        # Send welcome message with menu buttons
         await update.message.reply_html(
-            welcome_message, reply_markup=main_menu_markup
+            welcome_message,
+            reply_markup=main_menu_markup
         )
         return CHOOSING
     else:
@@ -923,23 +936,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = update.effective_user.id if update.effective_user else None
     is_admin = user_id in ADMIN_USERS
     help_text = (
-        "🤖 *BOT COMMANDS* 🤖\n\n"
-        "/start - Start the bot and see the main menu\n"
-        "/request - Request access from admin\n"
-        "/help - Show this help message\n"
+        "🤖 *Bot Commands*\n\n"
+        "`/start` \- Start the bot and show menu\n"
+        "`/request` \- Request access from admin\n"
+        "`/help` \- Show this help message\n"
     )
     if is_admin:
         help_text += (
-            "\n\n🔑 *ADMIN COMMANDS* 🔑\n"
-            "/approve <user_id> <username> <name> - Approve a user (you will select validity after this)\n"
-            "/remove <user_id> - Remove a user's access\n"
-            "/listusers - List all approved users\n"
-            "/broadcast <message> - Send a message to all users\n"
-            "/activate - Activate the bot for all users\n"
-            "/deactivate - Deactivate the bot for non-admin users\n"
-            "/adminhelp - Show admin commands help\n"
+            "\n🔑 *Admin Commands*\n"
+            "`/approve` \- Approve user \(format: /approve user\_id\)\n"
+            "`/remove` \- Remove user access\n"
+            "`/listusers` \- List all approved users\n"
+            "`/broadcast` \- Send message to all users\n"
+            "`/activate` \- Activate bot for all users\n"
+            "`/deactivate` \- Deactivate bot for non\-admins\n"
+            "`/restart_server` \- Restart the bot server\n"
+            "`/adminhelp` \- Show admin commands help\n"
         )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    await update.message.reply_text(help_text, parse_mode='MarkdownV2')
 
 async def echo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
@@ -1033,8 +1047,71 @@ ALWAYS_ALLOWED_COMMANDS = ["/help", "/info", "/echo", "/request"]
 def is_always_allowed_command(message):
     return message.text and any(message.text.startswith(cmd) for cmd in ALWAYS_ALLOWED_COMMANDS)
 
+async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle chat member updates (including chat deletions)"""
+    if update.my_chat_member and update.my_chat_member.new_chat_member.status == "kicked":
+        # Chat was deleted
+        user_id = update.effective_user.id
+        context.user_data.clear()
+        context.chat_data.clear()
+        logger.info(f"Chat deleted by user {user_id}, cleared conversation state")
+
+async def refresh_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Refresh the bot by clearing all states and cache (Admin only)"""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_USERS:
+        await update.message.reply_text("❌ This command is only for admins!")
+        return CHOOSING
+
+    try:
+        # Clear user data and chat data
+        context.user_data.clear()
+        context.chat_data.clear()
+        
+        # Clear persistence data if available
+        if hasattr(context.application, 'persistence'):
+            context.application.persistence.flush()
+        
+        # Remove keyboard first
+        await update.message.reply_text(
+            "🔄 Refreshing bot state...",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        # Send welcome message with fresh menu
+        welcome_message = (
+            f"Hi {update.effective_user.mention_html()}! \n\n"
+            f"Bot has been refreshed. All states have been cleared.\n\n"
+            f"Please choose an option from the menu below:"
+        )
+        
+        await update.message.reply_html(
+            welcome_message,
+            reply_markup=main_menu_markup
+        )
+        
+        logger.info(f"Bot refreshed by admin {user_id}")
+        return CHOOSING
+        
+    except Exception as e:
+        error_msg = f"❌ Error during refresh: {str(e)}"
+        logger.error(error_msg)
+        await update.message.reply_text(error_msg)
+        return CHOOSING
+
 async def main() -> None:
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Check if this is a restart
+    if os.path.exists("restart.flag"):
+        try:
+            with open("restart.flag", "r") as f:
+                restart_time = float(f.read().strip())
+            os.remove("restart.flag")
+            logger.info(f"Bot restarted successfully at {time.ctime(restart_time)}")
+        except Exception as e:
+            logger.error(f"Error reading restart flag: {e}")
+    
+    persistence = PicklePersistence(filepath="bot_data")
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).persistence(persistence).build()
 
     # Start monitoring task (optional, comment if not needed)
     # asyncio.create_task(monitor_health())
@@ -1070,7 +1147,10 @@ async def main() -> None:
 
     # --- Main conversation handler ---
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', original_start, filters=user_filter)],
+        entry_points=[
+            CommandHandler('start', original_start, filters=user_filter),
+            CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
+        ],
         states={
             CHOOSING: [
                 MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
@@ -1079,6 +1159,7 @@ async def main() -> None:
                 MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
                 MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
                 MessageHandler(filters.COMMAND, handle_global_commands),
+                CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
             ],
             COLLECTING_COOKIE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
@@ -1086,12 +1167,14 @@ async def main() -> None:
                 MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
                 MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
                 MessageHandler(filters.COMMAND, handle_global_commands),
+                CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
             ],
             AWAIT_COMBINE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
                 MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
                 MessageHandler(filters.TEXT & user_filter, handle_combine_files),
                 MessageHandler(filters.COMMAND, handle_global_commands),
+                CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
             ],
             AWAIT_FILTER_COOKIE: [
                 MessageHandler(filters.Document.TXT & user_filter, handle_filter_cookie),
@@ -1099,7 +1182,16 @@ async def main() -> None:
                 MessageHandler(filters.COMMAND, handle_global_commands),
             ],
         },
-        fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
+        fallbacks=[
+            CommandHandler('start', original_start, filters=user_filter),
+            CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
+        ],
+        name="main_conversation",
+        persistent=True,
+        allow_reentry=True,
+        per_chat=False,
+        per_user=True,
+        map_to_parent=True
     )
     application.add_handler(conv_handler)
     
@@ -1157,12 +1249,19 @@ async def main() -> None:
         await application.bot.delete_webhook()
         await application.stop()
 
+    # Add this handler in main() after other handlers
+    application.add_handler(ChatMemberHandler(handle_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+
+    # Add this in main() after other admin command handlers
+    application.add_handler(CommandHandler("refresh_bot", refresh_bot, filters=filters.User(ADMIN_USERS)), group=-1)
+
 if __name__ == "__main__":
     import os
     import asyncio
     BOT_MODE = os.getenv("BOT_MODE", "polling").lower()  # "polling" or "webhook"
     def main_polling():
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        persistence = PicklePersistence(filepath="bot_data")
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).persistence(persistence).build()
         # (Handlers setup code...)
         application.add_handler(MessageHandler(filters.ALL, update_user_information), group=-2)
         application.add_handler(MessageHandler(~user_filter & ~(filters.COMMAND & filters.User(ADMIN_USERS)), unauthorized), group=0)
@@ -1214,7 +1313,8 @@ if __name__ == "__main__":
         logger.info("Bot started in POLLING mode.")
         application.run_polling()
     async def main_webhook():
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        persistence = PicklePersistence(filepath="bot_data")
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).persistence(persistence).build()
         # (Handlers setup code...)
         application.add_handler(MessageHandler(filters.ALL, update_user_information), group=-2)
         application.add_handler(MessageHandler(~user_filter & ~(filters.COMMAND & filters.User(ADMIN_USERS)), unauthorized), group=0)
