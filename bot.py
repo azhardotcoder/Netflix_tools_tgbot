@@ -45,12 +45,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- State definitions for ConversationHandler ---
-CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_PRIVATIZE_COOKIE, AWAIT_FILTER_COOKIE, AWAIT_APPROVE_VALIDITY = range(7)
+CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_PRIVATIZE_COOKIE, AWAIT_FILTER_COOKIE, AWAIT_PAYPAL_BILLID, AWAIT_APPROVE_VALIDITY = range(8)
 
 # --- Keyboard Markups ---
 main_menu_keyboard = [
     ["🍪 Cookie Checker", "🔎 Account Info"],
-    ["🔒 Privatizer (Coming soon)", "🗂️ Combine .TXT"]
+    ["💳 Paypal Bill Id Finder", "🗂️ Combine .TXT"],
+    ["🔒 Privatizer (Coming soon)"]
 ]
 main_menu_markup = ReplyKeyboardMarkup(main_menu_keyboard, one_time_keyboard=True, resize_keyboard=True)
 
@@ -1140,6 +1141,113 @@ async def refresh_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text(error_msg)
         return CHOOSING
 
+async def paypal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for /paypal command"""
+    try:
+        await update.message.reply_text(
+            "💳 *PayPal Information*\n\n"
+            "Coming soon...",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error in paypal command: {e}")
+
+async def request_paypal_billid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    logger.info("[Paypal Bill Id Finder] Prompting user for Netflix cookie.")
+    context.user_data['paypal_billid_cookie'] = None
+    await update.message.reply_text(
+        "Please send your Netflix cookie as a .txt file or paste the cookie string below.\n\nThis will be used to fetch your PayPal Billing ID.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return AWAIT_PAYPAL_BILLID
+
+async def handle_paypal_billid_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    logger.info("[Paypal Bill Id Finder] Received cookie input from user.")
+    try:
+        # Accept file or text
+        if update.message.document and update.message.document.file_name.endswith('.txt'):
+            file = await context.bot.get_file(update.message.document.file_id)
+            temp_file_path = tempfile.mktemp(suffix=".txt")
+            await file.download_to_drive(custom_path=temp_file_path)
+            with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                cookie_str = f.read().strip()
+            os.remove(temp_file_path)
+        elif update.message.text:
+            cookie_str = update.message.text.strip()
+        else:
+            logger.warning("[Paypal Bill Id Finder] Invalid input: not a .txt file or text.")
+            await update.message.reply_text("That doesn't look like a .txt file or valid text. Please try again.")
+            return AWAIT_PAYPAL_BILLID
+
+        parsed_cookie = extract_cookie_from_line(cookie_str)
+        if not parsed_cookie:
+            logger.warning("[Paypal Bill Id Finder] Invalid cookie format.")
+            await update.message.reply_text("❌ Invalid cookie format. Please send a valid Netflix cookie (must contain both NetflixId and SecureNetflixId).\n\nExample: NetflixId=...; SecureNetflixId=...;")
+            return AWAIT_PAYPAL_BILLID
+
+        context.user_data['paypal_billid_cookie'] = parsed_cookie
+        loading_msg = await update.message.reply_text("⏳ Checking your account details, please wait...")
+        logger.info("[Paypal Bill Id Finder] Cookie validated. Fetching account info and billing activity.")
+
+        # Prepare cookies dict
+        cookies = {}
+        for part in parsed_cookie.strip().split(';'):
+            if '=' in part:
+                k, v = part.strip().split('=', 1)
+                cookies[k] = v
+        async with aiohttp.ClientSession(headers=get_random_headers()) as session:
+            async def fetch_page(url):
+                async with session.get(url, cookies=cookies, timeout=8) as resp:
+                    return await resp.text()
+            membership_url = 'https://www.netflix.com/account/membership'
+            security_url = 'https://www.netflix.com/account/security'
+            account_url = 'https://www.netflix.com/account'
+            billing_url = 'https://www.netflix.com/billingActivity'
+            tasks = [
+                fetch_page(membership_url),
+                fetch_page(security_url),
+                fetch_page(account_url),
+                fetch_page(billing_url),
+                fetch_netflix_service_code(session, cookies)
+            ]
+            membership_html, security_html, account_html, billing_html, service_code = await asyncio.gather(*tasks)
+
+        # Extract email using existing logic
+        info = extract_netflix_account_info(membership_html, security_html, account_html)
+        email = info.get('email')
+        logger.info(f"[Paypal Bill Id Finder] Extracted email: {email}")
+
+        # Extract PayPal Billing ID from billing_html
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(billing_html, 'html.parser')
+        billing_id = None
+        for div in soup.find_all('div', {'data-uia': 'payment-details+details+PAYPAL'}):
+            span = div.find('span', {'data-uia': 'mopType'})
+            if span and span.text.strip().startswith('B-'):
+                billing_id = span.text.strip()
+                break
+        logger.info(f"[Paypal Bill Id Finder] Extracted Billing ID: {billing_id}")
+
+        # Prepare response
+        if email and billing_id:
+            msg = f"<b>PayPal Billing ID Finder Result</b>\n\n<b>Email:</b> <code>{email}</code>\n<b>PayPal Billing ID:</b> <code>{billing_id}</code>\n<b>Service Code:</b> <code>{service_code or '-'}</code>"
+        elif email:
+            msg = f"<b>PayPal Billing ID Finder Result</b>\n\n<b>Email:</b> <code>{email}</code>\n<b>PayPal Billing ID:</b> Not found (PayPal not used or not available)\n<b>Service Code:</b> <code>{service_code or '-'}</code>"
+        else:
+            msg = "❌ Could not extract email or PayPal Billing ID. Please check your cookie and try again."
+        await update.message.reply_html(msg)
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+        await update.message.reply_text("What would you like to do next?", reply_markup=main_menu_markup)
+        logger.info("[Paypal Bill Id Finder] Completed and replied to user.")
+        return CHOOSING
+    except Exception as e:
+        logger.error(f"[Paypal Bill Id Finder] Error: {e}")
+        await update.message.reply_text(f"❌ Error fetching PayPal Billing ID: {e}", reply_markup=main_menu_markup)
+        return ConversationHandler.END
+
 async def main() -> None:
     # Check if this is a restart
     if os.path.exists("restart.flag"):
@@ -1196,7 +1304,8 @@ async def main() -> None:
             CHOOSING: [
                 MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
                 MessageHandler(filters.Regex('^🔎 Account Info$') & user_filter, request_filter_cookie),
-                MessageHandler(filters.Regex('^🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
+                MessageHandler(filters.Regex('💳 Paypal Bill Id Finder$') & user_filter, request_paypal_billid),
+                MessageHandler(filters.Regex('🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
                 MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
                 MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
                 MessageHandler(filters.COMMAND, handle_global_commands),
@@ -1221,6 +1330,12 @@ async def main() -> None:
                 MessageHandler(filters.Document.TXT & user_filter, handle_filter_cookie),
                 MessageHandler(filters.TEXT & user_filter, handle_filter_cookie),
                 MessageHandler(filters.COMMAND, handle_global_commands),
+            ],
+            AWAIT_PAYPAL_BILLID: [
+                MessageHandler(filters.Document.TXT & user_filter, handle_paypal_billid_cookie),
+                MessageHandler(filters.TEXT & user_filter, handle_paypal_billid_cookie),
+                MessageHandler(filters.COMMAND, handle_global_commands),
+                CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
             ],
         },
         fallbacks=[
@@ -1248,6 +1363,9 @@ async def main() -> None:
 
     # --- Echo command handler ---
     application.add_handler(CommandHandler("echo", echo_command), group=-1)
+
+    # --- PayPal command handler ---
+    application.add_handler(CommandHandler("paypal", paypal_command), group=-1)
 
     # Start web server for health checks and webhook
     app = web.Application()
@@ -1320,6 +1438,7 @@ if __name__ == "__main__":
                 CHOOSING: [
                     MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
                     MessageHandler(filters.Regex('🔎 Account Info$') & user_filter, request_filter_cookie),
+                    MessageHandler(filters.Regex('💳 Paypal Bill Id Finder$') & user_filter, request_paypal_billid),
                     MessageHandler(filters.Regex('🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
                     MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
                     MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
@@ -1343,6 +1462,12 @@ if __name__ == "__main__":
                     MessageHandler(filters.TEXT & user_filter, handle_filter_cookie),
                     MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
+                AWAIT_PAYPAL_BILLID: [
+                    MessageHandler(filters.Document.TXT & user_filter, handle_paypal_billid_cookie),
+                    MessageHandler(filters.TEXT & user_filter, handle_paypal_billid_cookie),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
+                    CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
+                ],
             },
             fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
         )
@@ -1351,6 +1476,7 @@ if __name__ == "__main__":
         application.add_handler(CommandHandler("testlegacy", test_legacy_send))
         application.add_handler(CommandHandler("chatinfo", get_chat_info))
         application.add_handler(CommandHandler("request", request_access), group=-1)
+        application.add_handler(CommandHandler("paypal", paypal_command), group=-1)
         logger.info("Bot started in POLLING mode.")
         application.run_polling()
     async def main_webhook():
@@ -1373,6 +1499,7 @@ if __name__ == "__main__":
                 CHOOSING: [
                     MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
                     MessageHandler(filters.Regex('🔎 Account Info$') & user_filter, request_filter_cookie),
+                    MessageHandler(filters.Regex('💳 Paypal Bill Id Finder$') & user_filter, request_paypal_billid),
                     MessageHandler(filters.Regex('🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
                     MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
                     MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
@@ -1396,6 +1523,12 @@ if __name__ == "__main__":
                     MessageHandler(filters.TEXT & user_filter, handle_filter_cookie),
                     MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
+                AWAIT_PAYPAL_BILLID: [
+                    MessageHandler(filters.Document.TXT & user_filter, handle_paypal_billid_cookie),
+                    MessageHandler(filters.TEXT & user_filter, handle_paypal_billid_cookie),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
+                    CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
+                ],
             },
             fallbacks=[CommandHandler('cancel', cancel, filters=user_filter), CommandHandler('start', original_start, filters=user_filter)],
         )
@@ -1404,6 +1537,7 @@ if __name__ == "__main__":
         application.add_handler(CommandHandler("testlegacy", test_legacy_send))
         application.add_handler(CommandHandler("chatinfo", get_chat_info))
         application.add_handler(CommandHandler("request", request_access), group=-1)
+        application.add_handler(CommandHandler("paypal", paypal_command), group=-1)
         app = web.Application()
         app.router.add_get('/health', health_check)
         port = int(os.environ.get('PORT', 8080))
