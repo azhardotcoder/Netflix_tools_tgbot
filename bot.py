@@ -15,7 +15,7 @@ from telegram.ext import (
     PicklePersistence,
     ChatMemberHandler
 )
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AUTHORIZED_USERS, ADMIN_USERS
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AUTHORIZED_USERS, ADMIN_USERS, MERCHANT_WALLET, BOT_ACTIVE
 from checkers import SafeFastChecker, check_cookies_async, parse_netflix_cookie, extract_cookie_from_line
 from file_utils import combine_temp_files
 from user_management import user_manager
@@ -37,6 +37,7 @@ import time
 # from bs4 import BeautifulSoup
 from utils import extract_netflix_account_info, get_random_headers, fetch_netflix_service_code
 from telegram.ext import CallbackContext
+from payment_verification import verify_subscription_payment, SUBSCRIPTION_PLANS
 
 # Enable logging
 logging.basicConfig(
@@ -45,12 +46,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- State definitions for ConversationHandler ---
-CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_PRIVATIZE_COOKIE, AWAIT_FILTER_COOKIE, AWAIT_APPROVE_VALIDITY = range(7)
+CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_PRIVATIZE_COOKIE, AWAIT_FILTER_COOKIE, AWAIT_APPROVE_VALIDITY, CHOOSING_PLAN, AWAITING_PAYMENT = range(9)
 
 # --- Keyboard Markups ---
 main_menu_keyboard = [
     ["🍪 Cookie Checker", "🔎 Account Info"],
-    ["🔒 Privatizer (Coming soon)", "🗂️ Combine .TXT"]
+    ["🔒 Privatizer (Coming soon)", "🗂️ Combine .TXT"],
+    ["💳 Buy Subscription"]
 ]
 main_menu_markup = ReplyKeyboardMarkup(main_menu_keyboard, one_time_keyboard=True, resize_keyboard=True)
 
@@ -104,56 +106,51 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def original_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Sends a welcome message and the main menu."""
-    # Clear any existing conversation state
     context.user_data.clear()
     context.chat_data.clear()
     
     user = update.effective_user
     user_id = user.id if user else None
     
-    # Track this user in the user manager if they're not already tracked
-    # Only add them if they're an admin or already approved
-    if user_id in ADMIN_USERS or user_manager.is_user_approved(user_id):
-        # Add user to tracking if not already there
-        if not user_manager.is_user_approved(user_id) and user_id in ADMIN_USERS:
-            user_manager.add_user(user_id, user.username, user.first_name)
-            
+    # Check if user is authorized
+    is_authorized = user_id in ADMIN_USERS or user_manager.is_user_approved(user_id)
+    
+    if is_authorized:
+        keyboard = [
+            ["🍪 Cookie Checker", "🔎 Account Info"],
+            ["🔒 Privatizer (Coming soon)", "🗂️ Combine .TXT"]
+        ]
         welcome_message = (
-            f"Hi {user.mention_html()}! \n\n"
+            f"Hi {user.mention_html()}!\n\n"
             f"Welcome to the Netflix Cookie Checker Bot.\n\n"
             f"Please choose an option from the menu below:"
         )
-        
-        # Send welcome message with menu buttons
-        await update.message.reply_html(
-            welcome_message,
-            reply_markup=main_menu_markup
-        )
-        return CHOOSING
     else:
-        # Notify all admins about new user
-        for admin_id in ADMIN_USERS:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=(
-                        f"👤 New user started the bot:\n"
-                        f"ID: {user_id}\n"
-                        f"Username: @{user.username or 'N/A'}\n"
-                        f"Name: {user.first_name or ''}\n"
-                        f"Approve with /approve {user_id}"
-                    )
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify admin: {e}")
-        # User is not approved
-        await update.message.reply_html(
-            f"Hi {user.mention_html()}! 👋\n\n"
-            f"You are not authorized to use this bot.\n"
-            f"Your User ID: {user_id}\n\n"
-            f"Use /request to request access from the administrator."
+        keyboard = [["💳 Buy Subscription"]]
+        welcome_message = (
+            f"Hi {user.mention_html()}!\n\n"
+            f"You don't have an active subscription to use this bot.\n"
+            f"Please purchase a subscription to continue."
         )
-        return ConversationHandler.END
+    
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_html(welcome_message, reply_markup=reply_markup)
+    return CHOOSING
+
+# Update main menu markup for dynamic usage
+def get_user_menu_markup(user_id: int) -> ReplyKeyboardMarkup:
+    """Get appropriate menu markup based on user authorization status"""
+    is_authorized = user_id in ADMIN_USERS or user_manager.is_user_approved(user_id)
+    
+    if is_authorized:
+        keyboard = [
+            ["🍪 Cookie Checker", "🔎 Account Info"],
+            ["🔒 Privatizer (Coming soon)", "🗂️ Combine .TXT"]
+        ]
+    else:
+        keyboard = [["💳 Buy Subscription"]]
+    
+    return ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
 
 # --- Cookie Checker Flow ---
 async def request_cookie_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -511,12 +508,17 @@ class ApprovedUserFilter(filters.MessageFilter):
 user_filter = ApprovedUserFilter()
 
 async def unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Message for users not authorized"""
+    """Handle unauthorized users by showing subscription message"""
     user = update.effective_user
+    keyboard = [["💳 Buy Subscription"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    
     await update.message.reply_text(
-        f"⛔ You are not authorized to use this bot.\n\n"
-        f"Your User ID: {user.id}\n\n"
-        f"Please use /request to request access or contact @knightownr for approval"
+        f"🔒 Hello {user.mention_html()}!\n\n"
+        f"You don't have an active subscription to use this bot.\n"
+        f"Please purchase a subscription to continue.",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
     )
 
 # --- Admin commands ---
@@ -1140,6 +1142,191 @@ async def refresh_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text(error_msg)
         return CHOOSING
 
+async def show_subscription_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show available subscription plans"""
+    keyboard = [
+        ["1 Day - 2 USDT", "1 Month - 10 USDT"],
+        ["1 Year - 40 USDT", "Lifetime - 100 USDT"],
+        ["❌ Cancel"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        "🔓 Choose a subscription plan:\n\n"
+        "• 1 Day: 2 USDT\n"
+        "• 1 Month: 10 USDT\n"
+        "• 1 Year: 40 USDT\n"
+        "• Lifetime: 100 USDT",
+        reply_markup=reply_markup
+    )
+    return CHOOSING_PLAN
+
+async def handle_plan_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle subscription plan selection"""
+    text = update.message.text
+    
+    if text == "❌ Cancel":
+        keyboard = [["💳 Buy Subscription"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text(
+            "Operation cancelled.\n"
+            "You still need a subscription to use the bot.",
+            reply_markup=reply_markup
+        )
+        return CHOOSING
+    
+    # Map button text to plan key
+    plan_mapping = {
+        "1 Day - 2 USDT": "1_day",
+        "1 Month - 10 USDT": "1_month",
+        "1 Year - 40 USDT": "1_year",
+        "Lifetime - 100 USDT": "lifetime"
+    }
+    
+    selected_plan = plan_mapping.get(text)
+    if not selected_plan:
+        keyboard = [["💳 Buy Subscription"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text(
+            "Please select a valid plan from the options.",
+            reply_markup=reply_markup
+        )
+        return CHOOSING
+    
+    context.user_data['selected_plan'] = selected_plan
+    
+    # Get plan amount
+    plan_amounts = {
+        "1_day": "2",
+        "1_month": "10",
+        "1_year": "40",
+        "lifetime": "100"
+    }
+    amount = plan_amounts.get(selected_plan, "0")
+    
+    keyboard = [["❌ Cancel"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        f"💳 Payment Details\n\n"
+        f"Selected Plan: {text}\n"
+        f"Amount: {amount} USDT\n\n"
+        f"Please send exactly {amount} USDT (BEP-20) to:\n"
+        f"`{MERCHANT_WALLET}`\n\n"
+        f"⚠️ Important:\n"
+        f"• Use BNB Smart Chain (BSC) network\n"
+        f"• Send exact amount in USDT\n"
+        f"• Only USDT BEP-20 accepted\n\n"
+        f"After sending, forward the transaction hash (TXID) here.",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+    return AWAITING_PAYMENT
+
+async def handle_payment_verification(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Verify payment transaction and activate subscription"""
+    if update.message.text == "❌ Cancel":
+        await update.message.reply_text("Operation cancelled.", reply_markup=main_menu_markup)
+        return CHOOSING
+        
+    txid = update.message.text.strip()
+    selected_plan = context.user_data.get('selected_plan')
+    
+    if not selected_plan:
+        await update.message.reply_text(
+            "Session expired. Please start over.",
+            reply_markup=main_menu_markup
+        )
+        return CHOOSING
+        
+    # Show processing message
+    processing_msg = await update.message.reply_text(
+        "🔄 Verifying your payment...",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    
+    # Verify the payment
+    success, message = verify_subscription_payment(txid, selected_plan)
+    
+    if success:
+        # Update user's subscription in the database
+        user_id = update.effective_user.id
+        try:
+            # Add subscription logic here based on the plan
+            if selected_plan == "1_day":
+                expiry = datetime.now() + timedelta(days=1)
+            elif selected_plan == "1_month":
+                expiry = datetime.now() + timedelta(days=30)
+            elif selected_plan == "1_year":
+                expiry = datetime.now() + timedelta(days=365)
+            else:  # lifetime
+                expiry = datetime.max
+                
+            # Add user if not exists and update subscription
+            if not user_manager.is_user_approved(user_id):
+                user_manager.add_user(
+                    user_id,
+                    update.effective_user.username,
+                    update.effective_user.first_name
+                )
+            user_manager.update_user_subscription(user_id, expiry)
+            
+            await processing_msg.edit_text(
+                f"✅ Payment verified!\n"
+                f"Your subscription has been activated.\n"
+                f"Plan: {selected_plan.replace('_', ' ').title()}\n"
+                f"Valid until: {expiry.strftime('%Y-%m-%d %H:%M:%S') if expiry != datetime.max else 'Lifetime'}\n\n"
+                f"You can now use the bot! Type /start to begin.",
+                reply_markup=get_user_menu_markup(user_id)
+            )
+            
+            # Notify admins about new subscription
+            admin_msg = (
+                f"🆕 New Subscription!\n"
+                f"User: {update.effective_user.mention_html()} (ID: {user_id})\n"
+                f"Plan: {selected_plan.replace('_', ' ').title()}\n"
+                f"TXID: `{txid}`"
+            )
+            for admin_id in ADMIN_USERS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=admin_msg,
+                        parse_mode='HTML'
+                    )
+                except Exception:
+                    continue
+                    
+        except Exception as e:
+            await processing_msg.edit_text(
+                f"❌ Error activating subscription: {str(e)}",
+                reply_markup=main_menu_markup
+            )
+    else:
+        await processing_msg.edit_text(
+            f"❌ Payment verification failed:\n{message}",
+            reply_markup=get_user_menu_markup(user_id)
+        )
+    
+    # Clear user data
+    context.user_data.pop('selected_plan', None)
+    return CHOOSING
+
+# --- ConversationHandler for Subscription ---
+subscription_conv = ConversationHandler(
+    entry_points=[CommandHandler("buy_subscription", show_subscription_plans, filters=filters.User(ADMIN_USERS))],
+    states={
+        CHOOSING_PLAN: [
+            MessageHandler(filters.Regex('^(1 Day - 2 USDT|1 Month - 10 USDT|1 Year - 40 USDT|Lifetime - 100 USDT|❌ Cancel)$'), handle_plan_selection)
+        ],
+        AWAITING_PAYMENT: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND & user_filter, handle_payment_verification)
+        ]
+    },
+    fallbacks=[],
+    allow_reentry=True
+)
+
 async def main() -> None:
     # Check if this is a restart
     if os.path.exists("restart.flag"):
@@ -1198,29 +1385,31 @@ async def main() -> None:
                 MessageHandler(filters.Regex('^🔎 Account Info$') & user_filter, request_filter_cookie),
                 MessageHandler(filters.Regex('^🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
                 MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
+                MessageHandler(filters.Regex('^💳 Buy Subscription$'), show_subscription_plans),
                 MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
                 MessageHandler(filters.COMMAND, handle_global_commands),
                 CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
+            ],
+            CHOOSING_PLAN: [
+                MessageHandler(filters.Regex('^(1 Day - 2 USDT|1 Month - 10 USDT|1 Year - 40 USDT|Lifetime - 100 USDT|❌ Cancel)$'), handle_plan_selection),
+            ],
+            AWAITING_PAYMENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_payment_verification),
             ],
             COLLECTING_COOKIE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
                 MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_cookie_files),
                 MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
                 MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
-                MessageHandler(filters.COMMAND, handle_global_commands),
-                CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
             ],
             AWAIT_COMBINE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
                 MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
                 MessageHandler(filters.TEXT & user_filter, handle_combine_files),
-                MessageHandler(filters.COMMAND, handle_global_commands),
-                CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
             ],
             AWAIT_FILTER_COOKIE: [
                 MessageHandler(filters.Document.TXT & user_filter, handle_filter_cookie),
                 MessageHandler(filters.TEXT & user_filter, handle_filter_cookie),
-                MessageHandler(filters.COMMAND, handle_global_commands),
             ],
         },
         fallbacks=[
@@ -1229,10 +1418,7 @@ async def main() -> None:
         ],
         name="main_conversation",
         persistent=True,
-        allow_reentry=True,
-        per_chat=False,
-        per_user=True,
-        map_to_parent=True
+        allow_reentry=True
     )
     application.add_handler(conv_handler)
     
@@ -1248,6 +1434,9 @@ async def main() -> None:
 
     # --- Echo command handler ---
     application.add_handler(CommandHandler("echo", echo_command), group=-1)
+
+    # --- Subscription handler ---
+    application.add_handler(subscription_conv)
 
     # Start web server for health checks and webhook
     app = web.Application()

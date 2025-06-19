@@ -1,7 +1,7 @@
 import json
 import os
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime
 
 # Configure logging
@@ -13,119 +13,119 @@ logger = logging.getLogger(__name__)
 class UserManager:
     """Manages user access to the bot"""
     
-    def __init__(self, storage_file: str = "approved_users.json"):
+    def __init__(self, filename: str = "approved_users.json"):
         """Initialize the user manager with a storage file"""
-        self.storage_file = storage_file
-        self.users: Dict[str, Dict] = {}
-        self.load_users()
+        self.filename = filename
+        self.users = self._load_users()
     
-    def load_users(self) -> None:
+    def _load_users(self) -> Dict[str, Dict[str, Any]]:
         """Load users from the storage file"""
-        if os.path.exists(self.storage_file):
-            try:
-                with open(self.storage_file, 'r') as f:
-                    self.users = json.load(f)
-                logger.info(f"Loaded {len(self.users)} users from {self.storage_file}")
-            except Exception as e:
-                logger.error(f"Error loading users from {self.storage_file}: {e}")
-                self.users = {}
-        else:
-            logger.info(f"User storage file {self.storage_file} not found, starting with empty user list")
-            self.users = {}
+        try:
+            with open(self.filename, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
     
-    def save_users(self) -> None:
+    def _save_users(self) -> None:
         """Save users to the storage file"""
         try:
-            with open(self.storage_file, 'w') as f:
-                json.dump(self.users, f, indent=2)
-            logger.info(f"Saved {len(self.users)} users to {self.storage_file}")
+            with open(self.filename, "w") as f:
+                json.dump(self.users, f, indent=4, default=str)
+            logger.info(f"Saved {len(self.users)} users to {self.filename}")
         except Exception as e:
-            logger.error(f"Error saving users to {self.storage_file}: {e}")
+            logger.error(f"Error saving users to {self.filename}: {e}")
     
-    def add_user(self, user_id: int, username: Optional[str] = None, first_name: Optional[str] = None, valid_until: Optional[str] = None) -> bool:
-        """Add a user to the approved list with optional validity"""
-        user_id_str = str(user_id)  # Convert to string for JSON compatibility
-        
-        if user_id_str in self.users:
-            logger.info(f"User {user_id} already approved")
-            return False
-        
-        self.users[user_id_str] = {
+    def add_user(self, user_id: int, username: Optional[str] = None, first_name: Optional[str] = None) -> None:
+        """Add a new user to the approved users list"""
+        self.users[str(user_id)] = {
             "username": username,
             "first_name": first_name,
-            "approved_at": str(datetime.now()),
-            "valid_until": valid_until if valid_until is not None else "lifetime"
+            "added_at": datetime.now().isoformat(),
+            "subscription_expiry": None
         }
-        self.save_users()
-        logger.info(f"User {user_id} ({username or first_name or 'Unknown'}) approved with validity {valid_until}")
-        return True
+        self._save_users()
     
     def remove_user(self, user_id: int) -> bool:
-        """Remove a user from the approved list"""
-        user_id_str = str(user_id)  # Convert to string for JSON compatibility
-        
-        if user_id_str not in self.users:
-            logger.info(f"User {user_id} not found in approved users")
-            return False
-        
-        del self.users[user_id_str]
-        self.save_users()
-        logger.info(f"User {user_id} removed from approved users")
-        return True
+        """Remove a user from the approved users list"""
+        if str(user_id) in self.users:
+            del self.users[str(user_id)]
+            self._save_users()
+            logger.info(f"User {user_id} removed from approved users")
+            return True
+        logger.info(f"User {user_id} not found in approved users")
+        return False
     
     def is_user_approved(self, user_id: int) -> bool:
-        """Check if a user is approved and not expired"""
-        user_id_str = str(user_id)
-        if user_id_str not in self.users:
+        """Check if a user is approved and has valid subscription"""
+        user = self.users.get(str(user_id))
+        if not user:
             return False
-        if self.is_user_expired(user_id):
-            # Auto-remove expired user
-            self.remove_user(user_id)
+            
+        expiry = user.get("subscription_expiry")
+        if expiry is None:
             return False
-        return True
+            
+        if expiry == "lifetime":
+            return True
+            
+        try:
+            expiry_date = datetime.fromisoformat(expiry)
+            return datetime.now() <= expiry_date
+        except (ValueError, TypeError):
+            return False
     
-    def get_all_users(self) -> List[Dict]:
-        """Get all approved users with their details"""
-        return [{
-            "user_id": int(user_id),
-            **user_data
-        } for user_id, user_data in self.users.items()]
+    def update_user_subscription(self, user_id: int, expiry: datetime) -> None:
+        """Update user's subscription expiry date"""
+        if str(user_id) not in self.users:
+            raise ValueError("User not found")
+            
+        self.users[str(user_id)]["subscription_expiry"] = (
+            "lifetime" if expiry == datetime.max else expiry.isoformat()
+        )
+        self._save_users()
+    
+    def get_user_subscription_status(self, user_id: int) -> Dict[str, Any]:
+        """Get user's subscription status"""
+        user = self.users.get(str(user_id))
+        if not user:
+            return {"active": False, "expiry": None}
+            
+        expiry = user.get("subscription_expiry")
+        if expiry is None:
+            return {"active": False, "expiry": None}
+            
+        if expiry == "lifetime":
+            return {"active": True, "expiry": "lifetime"}
+            
+        try:
+            expiry_date = datetime.fromisoformat(expiry)
+            return {
+                "active": datetime.now() <= expiry_date,
+                "expiry": expiry_date.isoformat()
+            }
+        except (ValueError, TypeError):
+            return {"active": False, "expiry": None}
+    
+    def get_all_users(self) -> Dict[str, Dict[str, Any]]:
+        """Get all users and their data"""
+        return self.users
     
     def update_user_info(self, user_id: int, username: Optional[str] = None, first_name: Optional[str] = None, last_name: Optional[str] = None) -> bool:
         """Update user information if the user exists"""
-        user_id_str = str(user_id)  # Convert to string for JSON compatibility
-        
-        if user_id_str not in self.users:
-            # User not found, nothing to update
+        if str(user_id) not in self.users:
             return False
         
-        # Update user information if provided
+        user_data = self.users[str(user_id)]
+        
         if username is not None:
-            self.users[user_id_str]["username"] = username
-        
+            user_data["username"] = username
         if first_name is not None:
-            self.users[user_id_str]["first_name"] = first_name
-        
+            user_data["first_name"] = first_name
         if last_name is not None:
-            self.users[user_id_str]["last_name"] = last_name
+            user_data["last_name"] = last_name
         
-        self.save_users()
-        logger.info(f"Updated information for user {user_id} (username: {username}, first_name: {first_name}, last_name: {last_name})")
+        self._save_users()
         return True
 
-    def is_user_expired(self, user_id: int) -> bool:
-        """Check if a user's validity has expired"""
-        user_id_str = str(user_id)
-        user = self.users.get(user_id_str)
-        if not user:
-            return True
-        valid_until = user.get("valid_until")
-        if not valid_until or valid_until == "lifetime":
-            return False
-        try:
-            return datetime.now() > datetime.fromisoformat(valid_until)
-        except Exception:
-            return False
-
-# Create a singleton instance
+# Create a global instance
 user_manager = UserManager()
