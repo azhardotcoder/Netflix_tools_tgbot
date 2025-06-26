@@ -160,3 +160,46 @@ async def fetch_netflix_service_code(session, cookies=None):
             return None
     except Exception:
         return None
+
+def convert_netscape_cookie_lines(lines):
+    """Convert Netscape HTTP Cookie file lines to list of Netflix cookie strings.
+
+    Args:
+        lines (Iterable[str]): Lines from a Netscape cookie file.
+
+    Returns:
+        list[str]: List of strings like 'NetflixId=...; SecureNetflixId=...'.
+    """
+    results = []
+    # Temporary storage for the current set that will be combined
+    current = {}
+
+    for raw in lines:
+        line = raw.strip()
+        # Skip blank lines or header comments (but keep #HttpOnly_ prefix as it includes data)
+        if not line or (line.startswith('#') and not line.startswith('#HttpOnly_')):
+            continue
+
+        # Remove optional '#HttpOnly_' prefix which some browser exports add
+        if line.startswith('#HttpOnly_'):
+            line = line[len('#HttpOnly_'):]
+
+        # Netscape format ideally uses tab, but some sources convert tabs to spaces when pasted.
+        # Split on any consecutive whitespace (tab or spaces)
+        parts = re.split(r"\s+", line)
+        if len(parts) < 7:
+            continue  # Not a valid cookie row
+
+        name = parts[5].strip()
+        value = parts[6].strip()
+
+        if name in ("NetflixId", "SecureNetflixId"):
+            current[name] = value
+
+        # Once both are collected, create combined cookie string
+        if "NetflixId" in current and "SecureNetflixId" in current:
+            cookie_str = f"NetflixId={current['NetflixId']}; SecureNetflixId={current['SecureNetflixId']}"
+            results.append(cookie_str)
+            current = {}  # Reset for the next possible account
+
+    return results

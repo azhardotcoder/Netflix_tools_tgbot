@@ -35,7 +35,7 @@ import time
 # from selenium.webdriver.support.ui import WebDriverWait
 # from selenium.webdriver.support import expected_conditions as EC
 # from bs4 import BeautifulSoup
-from utils import extract_netflix_account_info, get_random_headers, fetch_netflix_service_code
+from utils import extract_netflix_account_info, get_random_headers, fetch_netflix_service_code, convert_netscape_cookie_lines
 from telegram.ext import CallbackContext
 
 # Enable logging
@@ -186,12 +186,19 @@ async def handle_cookie_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=ReplyKeyboardRemove()
     )
     
-    lines_to_check = []
+    raw_lines = []
     try:
         with open(temp_file_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines_to_check = [line.strip() for line in f if line.strip()]
+            raw_lines = f.readlines()
     finally:
         os.remove(temp_file_path)
+
+    # Try Netscape conversion first
+    netscape_lines = convert_netscape_cookie_lines(raw_lines)
+    if netscape_lines:
+        lines_to_check = netscape_lines
+    else:
+        lines_to_check = [line.strip() for line in raw_lines if line.strip()]
 
     if not lines_to_check:
         await update.message.reply_text("The file is empty. Please try again.", reply_markup=main_menu_markup)
@@ -272,7 +279,12 @@ async def process_cookie_files(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             with open(file_info['path'], "r", encoding="utf-8", errors="ignore") as f:
                 cookies = [line.strip() for line in f if line.strip()]
-                all_cookies.extend(cookies)
+                # Try netscape conversion per-file
+                netscape = convert_netscape_cookie_lines(cookies)
+                if netscape:
+                    all_cookies.extend(netscape)
+                else:
+                    all_cookies.extend(cookies)
                 logger.info(f"Added {len(cookies)} cookies from {file_info['name']}")
         except Exception as e:
             logger.error(f"Error reading file {file_info['path']}: {e}")

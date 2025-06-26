@@ -23,6 +23,14 @@ def parse_netflix_cookie(cookie_str):
         # Remove any leading/trailing whitespace
         cookie_str = cookie_str.strip()
         
+        # --- NEW: normalize loose formats ------------------------------------
+        # 1) Replace the pipe (|) separator that some dumps use with semicolon
+        # 2) Remove extra spaces around '=' signs (e.g. 'NetflixId = abc')
+        # 3) Collapse multiple spaces and tidy up
+        cookie_str = cookie_str.replace('|', ';')
+        cookie_str = re.sub(r"\s*=\s*", "=", cookie_str)  # ' = ' -> '='
+        # --------------------------------------------------------------------
+        
         # Handle different formats
         if " | Cookie = " in cookie_str:
             cookie_str = cookie_str.split(" | Cookie = ")[-1].strip()
