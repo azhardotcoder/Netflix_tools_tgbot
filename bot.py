@@ -45,13 +45,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- State definitions for ConversationHandler ---
-CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_PRIVATIZE_COOKIE, AWAIT_FILTER_COOKIE, AWAIT_PAYPAL_BILLID, AWAIT_APPROVE_VALIDITY = range(8)
+CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_FILTER_COOKIE, AWAIT_PAYPAL_BILLID, AWAIT_APPROVE_VALIDITY = range(7)
 
 # --- Keyboard Markups ---
 main_menu_keyboard = [
     ["🍪 Cookie Checker", "🔎 Account Info"],
-    ["💳 Paypal Bill Id Finder", "🗂️ Combine .TXT"],
-    ["🔒 Privatizer (Coming soon)"]
+    ["💳 Paypal Bill Id Finder", "��️ Combine .TXT"]
 ]
 main_menu_markup = ReplyKeyboardMarkup(main_menu_keyboard, one_time_keyboard=True, resize_keyboard=True)
 
@@ -819,13 +818,6 @@ async def invalidate_netflix_cookie(netflix_id: str, secure_netflix_id: str) -> 
         logger.error(f"Error invalidating cookie: {e}")
         return False
 
-async def request_privatize_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "🔒 Privatize Cookie feature is coming soon!\n\n"
-        "Stay tuned for updates."
-    )
-    return CHOOSING
-
 async def request_filter_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['filter_cookie_file'] = None
     await update.message.reply_text(
@@ -840,10 +832,20 @@ async def handle_filter_cookie(update: Update, context: ContextTypes.DEFAULT_TYP
         temp_file_path = tempfile.mktemp(suffix=".txt")
         await file.download_to_drive(custom_path=temp_file_path)
         with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            cookie_str = f.read().strip()
+            raw_lines = f.readlines()
+            netscape = convert_netscape_cookie_lines(raw_lines)
+            if netscape:
+                cookie_str = netscape[0]
+            else:
+                cookie_str = ''.join(raw_lines).strip()
         os.remove(temp_file_path)
     elif update.message.text:
-        cookie_str = update.message.text.strip()
+        text_raw = update.message.text.strip()
+        netscape = convert_netscape_cookie_lines(text_raw.splitlines())
+        if netscape:
+            cookie_str = netscape[0]
+        else:
+            cookie_str = text_raw
     else:
         await update.message.reply_text("That doesn't look like a .txt file or valid text. Please try again.")
         return AWAIT_FILTER_COOKIE
@@ -1182,10 +1184,42 @@ async def handle_paypal_billid_cookie(update: Update, context: ContextTypes.DEFA
             temp_file_path = tempfile.mktemp(suffix=".txt")
             await file.download_to_drive(custom_path=temp_file_path)
             with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                cookie_str = f.read().strip()
+                raw_lines = f.readlines()
+                netscape_cookies = convert_netscape_cookie_lines(raw_lines)
+                if netscape_cookies:
+                    # Try each Netscape cookie until we find a valid one
+                    valid_cookie = None
+                    for cookie_str in netscape_cookies:
+                        parsed = extract_cookie_from_line(cookie_str)
+                        if parsed:
+                            valid_cookie = parsed
+                            break
+                    if valid_cookie:
+                        cookie_str = valid_cookie
+                    else:
+                        await update.message.reply_text("❌ No valid Netflix cookies found in Netscape format. Please check your file.")
+                        return AWAIT_PAYPAL_BILLID
+                else:
+                    cookie_str = ''.join(raw_lines).strip()
             os.remove(temp_file_path)
         elif update.message.text:
-            cookie_str = update.message.text.strip()
+            text_raw = update.message.text.strip()
+            netscape_cookies = convert_netscape_cookie_lines(text_raw.splitlines())
+            if netscape_cookies:
+                # Try each Netscape cookie until we find a valid one
+                valid_cookie = None
+                for cookie_str in netscape_cookies:
+                    parsed = extract_cookie_from_line(cookie_str)
+                    if parsed:
+                        valid_cookie = parsed
+                        break
+                if valid_cookie:
+                    cookie_str = valid_cookie
+                else:
+                    await update.message.reply_text("❌ No valid Netflix cookies found in Netscape format. Please check your input.")
+                    return AWAIT_PAYPAL_BILLID
+            else:
+                cookie_str = text_raw
         else:
             logger.warning("[Paypal Bill Id Finder] Invalid input: not a .txt file or text.")
             await update.message.reply_text("That doesn't look like a .txt file or valid text. Please try again.")
@@ -1317,8 +1351,6 @@ async def main() -> None:
                 MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
                 MessageHandler(filters.Regex('^🔎 Account Info$') & user_filter, request_filter_cookie),
                 MessageHandler(filters.Regex('💳 Paypal Bill Id Finder$') & user_filter, request_paypal_billid),
-                MessageHandler(filters.Regex('🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
-                MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
                 MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
                 MessageHandler(filters.COMMAND, handle_global_commands),
                 CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
@@ -1451,8 +1483,6 @@ if __name__ == "__main__":
                     MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
                     MessageHandler(filters.Regex('🔎 Account Info$') & user_filter, request_filter_cookie),
                     MessageHandler(filters.Regex('💳 Paypal Bill Id Finder$') & user_filter, request_paypal_billid),
-                    MessageHandler(filters.Regex('🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
-                    MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
                     MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
                     MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
@@ -1512,8 +1542,6 @@ if __name__ == "__main__":
                     MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
                     MessageHandler(filters.Regex('🔎 Account Info$') & user_filter, request_filter_cookie),
                     MessageHandler(filters.Regex('💳 Paypal Bill Id Finder$') & user_filter, request_paypal_billid),
-                    MessageHandler(filters.Regex('🔒 Privatizer \(Coming soon\)$') & user_filter, request_privatize_cookie),
-                    MessageHandler(filters.Regex('🗂️ Combine \.TXT$') & user_filter, request_combine_files),
                     MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
                     MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
