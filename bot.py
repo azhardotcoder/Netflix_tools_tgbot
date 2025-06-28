@@ -50,7 +50,7 @@ CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT
 # --- Keyboard Markups ---
 main_menu_keyboard = [
     ["🍪 Cookie Checker", "🔎 Account Info"],
-    ["💳 Paypal Bill Id Finder", "��️ Combine .TXT"]
+    ["💳 Paypal Bill Id Finder", "📒 Combine .TXT"]
 ]
 main_menu_markup = ReplyKeyboardMarkup(main_menu_keyboard, one_time_keyboard=True, resize_keyboard=True)
 
