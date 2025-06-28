@@ -654,11 +654,31 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Broadcasts a message to all users who have started the bot."""
-    if not context.args:
-        await update.message.reply_text("⚠️ Please provide a message to broadcast.\nUsage: /broadcast Your message here")
+    # --- Determine caption text (optional) ---
+    caption_text = " ".join(context.args) if context.args else None
+
+    # --- Determine if there is an image to broadcast ---
+    photo_id = None
+    if update.message.photo:
+        # Command sent with attached photo
+        photo_id = update.message.photo[-1].file_id  # highest resolution
+    elif update.message.reply_to_message and update.message.reply_to_message.photo:
+        # Command is reply to a photo
+        photo_id = update.message.reply_to_message.photo[-1].file_id
+        if not caption_text:
+            caption_text = update.message.reply_to_message.caption
+
+    # Require at least text or photo
+    if not caption_text and not photo_id:
+        await update.message.reply_text(
+            "⚠️ Usage:\n"
+            "• Send /broadcast <message> to send a text broadcast\n"
+            "• Attach or reply to a photo and use /broadcast <caption (optional)> to send an image broadcast"
+        )
         return
-        
-    message = " ".join(context.args)
+
+    # Combine final message for text-only broadcast
+    text_message = f"📢 *BROADCAST MESSAGE*\n\n{caption_text}" if caption_text else "📢 *BROADCAST MESSAGE*"
     users = user_manager.get_all_users()
     
     if not users:
@@ -672,18 +692,26 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     for user in users:
         try:
-            await context.bot.send_message(
-                chat_id=user['user_id'],
-                text=f"📢 *BROADCAST MESSAGE*\n\n{message}",
-                parse_mode='Markdown'
-            )
+            if photo_id:
+                await context.bot.send_photo(
+                    chat_id=user['user_id'],
+                    photo=photo_id,
+                    caption=text_message,
+                    parse_mode='Markdown'
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=user['user_id'],
+                    text=text_message,
+                    parse_mode='Markdown'
+                )
             sent_count += 1
         except Exception as e:
             logger.error(f"Failed to send broadcast to user {user['user_id']}: {e}")
             failed_count += 1
     
     await update.message.reply_text(
-        f"✅ Broadcast complete!\n"  
+        f"✅ Broadcast complete!\n"
         f"📤 Successfully sent: {sent_count}\n"
         f"❌ Failed: {failed_count}"
     )
